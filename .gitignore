@@ -1,0 +1,38 @@
+# OS / editor
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node / frontend
+frontend/node_modules/
+frontend/.vite/
+frontend/dist/
+frontend/.turbo/
+
+# Environment / secrets / data
+.env
+*.env
+backend/bayse_agent.db
+backend/*.sqlite
+
+# Caches
+.pytest_cache/
+.coverage
+coverage.xml
+.cache/
+
+# IDE
+.idea/
+.vscode/
+
+# Builds
+*.egg-info/
+backend/.mypy_cache/
+backend/.ruff_cache/
