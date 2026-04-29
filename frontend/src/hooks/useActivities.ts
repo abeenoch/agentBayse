@@ -10,5 +10,6 @@ export function useActivities(page: number = 1, size: number = 20, type?: string
       });
       return data?.activities ?? [];
     },
+    refetchInterval: 20_000,
   });
 }

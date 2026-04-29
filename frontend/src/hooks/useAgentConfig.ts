@@ -6,7 +6,9 @@ export type AgentConfig = {
   categories: string[];
   max_trades_per_hour: number;
   max_trades_per_day: number;
+  max_open_positions: number;
   balance_floor: number;
+  min_confidence: number;
 };
 
 export function useAgentConfig() {

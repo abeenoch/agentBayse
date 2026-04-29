@@ -52,13 +52,36 @@ def calculate_implied_probability(market_price: float) -> float:
 
 
 def calculate_expected_value(prob: float, price: float, stake: float) -> float:
-    return (prob * (100 - price) - (1 - prob) * price) * (stake / 100)
+    """
+    Expected profit (same units as `stake`) for a binary market position.
+
+    Args:
+        prob: Probability the chosen outcome settles true (0-1).
+        price: Current market price for that outcome. Supports 0-1 or 0-100 scales.
+        stake: Currency amount we intend to allocate.
+
+    For fractional prices (0-1) with 1.0 payout, EV = (prob - price) * (stake / price).
+    For 0-100 prices (cents), price is converted to a 0-1 fraction first.
+    """
+    prob = min(max(prob, 0.0), 1.0)
+    price_frac = price / 100 if price > 1 else price
+    price_frac = min(max(price_frac, 1e-6), 0.999999)  # avoid divide-by-zero / absurd odds
+    edge = prob - price_frac
+    return edge * (stake / price_frac)
 
 
 def calculate_kelly_criterion(prob: float, price: float) -> float:
-    b = (100 - price) / price if price else 0
+    """
+    Kelly fraction for a binary outcome with payout 1 and price in 0-1 or 0-100 scale.
+    Returns fraction of bankroll to stake (0-1).
+    """
+    prob = min(max(prob, 0.0), 1.0)
+    price_frac = price / 100 if price > 1 else price
+    if price_frac <= 0 or price_frac >= 1:
+        return 0.0
+    b = (1 - price_frac) / price_frac
     q = 1 - prob
-    edge = (b * prob - q) / b if b else 0
+    edge = (b * prob - q) / b
     return max(0.0, edge)
 
 

@@ -10,6 +10,7 @@ class Signal(Base):
     __tablename__ = "signals"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    event_id = Column(String, nullable=True)   # parent event; nullable for backwards compat
     market_id = Column(String, nullable=False)
     market_name = Column(String, nullable=False)
     signal_type = Column(String, nullable=False)
@@ -17,11 +18,14 @@ class Signal(Base):
     estimated_probability = Column(Float, nullable=False)
     market_price_at_signal = Column(Float, nullable=False)
     expected_value = Column(Float, nullable=False)
+    rank_score = Column(Float, nullable=True)
     reasoning = Column(String, nullable=False)
     sources = Column(JSON, nullable=True)
     suggested_stake = Column(Float, nullable=False)
     risk_level = Column(String, nullable=False)
     status = Column(String, nullable=False, default="PENDING")
+    resolution = Column(String, nullable=True)
+    pnl = Column(Float, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     approved_at = Column(DateTime, nullable=True)
     agent_cycle_id = Column(String, nullable=True)

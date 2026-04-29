@@ -4,11 +4,14 @@ import { Dashboard } from "./pages/Dashboard";
 import { Markets } from "./pages/Markets";
 import { Signals } from "./pages/Signals";
 import { Settings } from "./pages/Settings";
+import { useWebSocket } from "./hooks/useWebSocket";
 
 const navClasses = ({ isActive }: { isActive: boolean }) =>
   `px-3 py-2 rounded-lg text-sm ${isActive ? "bg-primary/20 text-primary" : "text-muted hover:text-text"}`;
 
 function App() {
+  useWebSocket(); // global WS — invalidates queries on new signals/events
+
   return (
     <div className="min-h-screen bg-bg text-text">
       <div className="mx-auto max-w-6xl px-4 py-6">

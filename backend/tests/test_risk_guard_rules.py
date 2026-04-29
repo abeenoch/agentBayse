@@ -13,7 +13,8 @@ def test_risk_guard_blocks_negative_ev(monkeypatch):
 
 def test_risk_guard_blocks_low_confidence(monkeypatch):
     monkeypatch.setattr(settings, "mock_mode", False)
-    sig = {"suggested_stake": 100, "expected_value": 10, "confidence": 50, "created_at": "2026-01-01T00:00:00"}
+    thresh = getattr(settings, "agent_min_confidence", 60)
+    sig = {"suggested_stake": 100, "expected_value": 10, "confidence": thresh - 5, "created_at": "2026-01-01T00:00:00"}
     portfolio = {"portfolioCurrentValue": 1000}
     result = risk_guard(sig, portfolio)
     assert not result.passed

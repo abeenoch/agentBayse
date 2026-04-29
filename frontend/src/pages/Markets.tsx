@@ -9,7 +9,10 @@ import { AreaChart, Area, XAxis, YAxis, CartesianGrid, ResponsiveContainer, BarC
 import { useMemo } from "react";
 
 export function Markets() {
-  const { data: markets, isLoading } = useMarkets(50, 1);
+  const [page, setPage] = useState(1);
+  const [category, setCategory] = useState<string | undefined>(undefined);
+  const { data, isLoading } = useMarkets(30, page, category);
+  const markets = data?.events || [];
   const [selected, setSelected] = useState<any | null>(null);
   const firstMarket = selected?.markets?.[0];
   const ticker = useTicker(firstMarket?.id);
@@ -28,10 +31,17 @@ export function Markets() {
     })).filter((p) => p.price !== 0);
   }, [priceHistory.data]);
 
+  const orderBooks = useMemo(() => {
+    if (!orderbook.data) return [];
+    if (Array.isArray(orderbook.data)) return orderbook.data;
+    if (orderbook.data.orderBooks && Array.isArray(orderbook.data.orderBooks)) return orderbook.data.orderBooks;
+    return [];
+  }, [orderbook.data]);
+
   const bidSum =
-    orderbook.data?.[0]?.bids?.slice(0, 5).reduce((acc: number, b: any) => acc + (b.total ?? 0), 0) || 0;
+    orderBooks?.[0]?.bids?.slice(0, 5).reduce((acc: number, b: any) => acc + (b.total ?? 0), 0) || 0;
   const askSum =
-    orderbook.data?.[0]?.asks?.slice(0, 5).reduce((acc: number, b: any) => acc + (b.total ?? 0), 0) || 0;
+    orderBooks?.[0]?.asks?.slice(0, 5).reduce((acc: number, b: any) => acc + (b.total ?? 0), 0) || 0;
 
   return (
     <div className="space-y-4">
@@ -39,6 +49,21 @@ export function Markets() {
         <div>
           <p className="text-sm text-muted">Browse</p>
           <h1 className="text-2xl font-semibold">Markets</h1>
+        </div>
+        <div className="flex gap-2">
+          {["", "crypto", "finance", "sports"].map((cat) => (
+            <button
+              key={cat}
+              onClick={() => { setCategory(cat || undefined); setPage(1); }}
+              className={`px-3 py-1 rounded-lg text-sm border transition ${
+                (category ?? "") === cat
+                  ? "border-primary bg-primary/20 text-primary"
+                  : "border-border text-muted hover:text-text"
+              }`}
+            >
+              {cat || "All"}
+            </button>
+          ))}
         </div>
       </header>
       {isLoading && <p className="text-muted">Loading...</p>}
@@ -60,6 +85,26 @@ export function Markets() {
         ))}
       </div>
       {!isLoading && !(markets?.length) && <p className="text-muted text-sm">No markets found.</p>}
+
+      <div className="flex items-center justify-between mt-4">
+        <button
+          onClick={() => setPage((p) => Math.max(1, p - 1))}
+          disabled={page === 1}
+          className="px-3 py-1 rounded-lg border border-border text-sm disabled:opacity-50"
+        >
+          Previous
+        </button>
+        <p className="text-xs text-muted">
+          Page {page} / {data?.pagination?.lastPage ?? "?"}
+        </p>
+        <button
+          onClick={() => setPage((p) => p + 1)}
+          disabled={data?.pagination && page >= (data.pagination.lastPage || page)}
+          className="px-3 py-1 rounded-lg border border-border text-sm disabled:opacity-50"
+        >
+          Next
+        </button>
+      </div>
 
       <Modal open={!!selected} onClose={() => setSelected(null)} title={selected?.title}>
         {selected && (
@@ -88,7 +133,7 @@ export function Markets() {
               </div>
             )}
             {!ticker.data && <p className="text-sm text-muted">No ticker data available.</p>}
-            {orderbook.data && Array.isArray(orderbook.data) && (
+            {orderBooks.length > 0 ? (
               <div className="text-sm border border-border rounded p-2">
                 <p className="font-semibold mb-2">Order Book (depth 5)</p>
                 <div className="h-28">
@@ -101,6 +146,8 @@ export function Markets() {
                   </ResponsiveContainer>
                 </div>
               </div>
+            ) : (
+              <p className="text-sm text-muted">No order book data available.</p>
             )}
             {trades.data?.length ? (
               <div className="text-sm border border-border rounded p-2 space-y-1">

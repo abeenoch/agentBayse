@@ -12,6 +12,14 @@ from app.config import settings
 from app.utils.logger import logger
 
 
+class BayseAuthError(RuntimeError):
+    pass
+
+
+class BayseRequestError(RuntimeError):
+    pass
+
+
 class BayseClient:
     """
     Thin async client for Bayse Markets REST API.
@@ -21,12 +29,18 @@ class BayseClient:
 
     def __init__(self):
         self.base_url = settings.bayse_base_url.rstrip("/")
-        self.public_key = settings.bayse_public_key
-        self.secret_key = settings.bayse_secret_key
-        self.default_currency = settings.bayse_default_currency
+        self.public_key = settings.bayse_public_key.strip().strip('"').strip("'")
+        self.private_key = settings.bayse_private_key.strip().strip('"').strip("'")
+        self.default_currency = settings.bayse_default_currency.strip().upper()
         self.mock_mode = settings.mock_mode
         self.client = httpx.AsyncClient(timeout=15.0)
         self.cache = TTLCache(maxsize=256, ttl=30)
+
+    def minimum_order_amount(self, currency: str | None = None) -> float:
+        curr = (currency or self.default_currency or "").strip().upper()
+        if curr == "NGN":
+            return 100.0
+        return 1.0
 
     async def _request(self, method: str, path: str, params: dict | None = None, json_body: dict | None = None, signed: bool = False):
         if self.mock_mode:
@@ -38,28 +52,85 @@ class BayseClient:
         if signed or self.public_key:
             headers["X-Public-Key"] = self.public_key
 
-        body_str = json.dumps(json_body) if json_body else ""
+        body_str = json.dumps(json_body, separators=(",", ":"), ensure_ascii=False) if json_body else ""
+        body_bytes = body_str.encode("utf-8") if body_str else b""
+        if body_bytes:
+            headers["Content-Type"] = "application/json"
         if signed:
             timestamp = str(int(time.time()))
-            body_hash = hashlib.sha256(body_str.encode()).hexdigest()
-            payload = f"{timestamp}.{method.upper()}.{path}.{body_hash}"
+            # Per Bayse docs: payload = "{timestamp}.{METHOD}.{/v1/path}.{bodyHash}"
+            # For no-body requests (DELETE), bodyHash is empty — payload ends with a dot.
+            base_path = self.base_url.replace("https://relay.bayse.markets", "").replace("http://relay.bayse.markets", "")
+            sign_path = f"{base_path}{path.split('?')[0]}"
+            body_hash = hashlib.sha256(body_bytes).hexdigest() if body_bytes else ""
+            payload = f"{timestamp}.{method.upper()}.{sign_path}.{body_hash}"
             signature = base64.b64encode(
-                hmac.new(self.secret_key.encode(), payload.encode(), hashlib.sha256).digest()
+                hmac.new(self.private_key.encode(), payload.encode(), hashlib.sha256).digest()
             ).decode()
+            logger.debug("Signing: %s body=%s", payload[:120], body_str)
             headers["X-Timestamp"] = timestamp
             headers["X-Signature"] = signature
 
+        # Strip None values from params so they don't get serialised as "None"
+        clean_params = {k: v for k, v in (params or {}).items() if v is not None} or None
+
         for attempt in range(3):
             try:
-                resp = await self.client.request(method, url, params=params, content=body_str if body_str else None, headers=headers)
+                resp = await self.client.request(method, url, params=clean_params, content=body_bytes if body_bytes else None, headers=headers)
                 if resp.status_code in (429, 500, 502, 503, 504):
                     await self._backoff(attempt)
                     continue
+                if resp.status_code == 401:
+                    # Auth failure — no point retrying, signing is wrong or keys are invalid
+                    err_detail = ""
+                    try:
+                        err_detail = resp.json()
+                    except Exception:
+                        err_detail = resp.text[:500]
+                    logger.error(
+                        "Bayse 401 Unauthorized on %s %s — check API keys and HMAC signing. response=%s",
+                        method,
+                        path,
+                        err_detail,
+                    )
+                    if signed:
+                        raise BayseAuthError(f"Bayse 401 Unauthorized on {method} {path}")
+                    return self._fallback_response(path, method, params, json_body)
+                if resp.status_code == 400:
+                    err_detail = ""
+                    try:
+                        err_detail = resp.json()
+                    except Exception:
+                        err_detail = resp.text[:500]
+                    logger.error(
+                        "Bayse 400 Bad Request on %s %s response=%s body=%s",
+                        method,
+                        path,
+                        err_detail,
+                        body_str,
+                    )
+                    raise BayseRequestError(f"Bayse 400 Bad Request on {method} {path}: {err_detail}")
+                if resp.status_code == 422:
+                    err_detail = ""
+                    try:
+                        err_detail = resp.json()
+                    except Exception:
+                        err_detail = resp.text[:500]
+                    logger.error(
+                        "Bayse 422 Unprocessable Entity on %s %s response=%s body=%s",
+                        method,
+                        path,
+                        err_detail,
+                        body_str,
+                    )
+                    raise BayseRequestError(f"Bayse 422 Unprocessable Entity on {method} {path}: {err_detail}")
                 resp.raise_for_status()
                 return resp.json()
             except httpx.HTTPError as exc:
                 logger.warning("Bayse request error %s %s attempt=%s err=%s", method, path, attempt, exc)
                 if attempt == 2:
+                    if signed:
+                        raise
                     return self._fallback_response(path, method, params, json_body)
             except httpx.RequestError as exc:
                 logger.warning("Bayse request error %s %s attempt=%s err=%s", method, path, attempt, exc)
@@ -73,8 +144,8 @@ class BayseClient:
         await asyncio.sleep(delay)
 
     #Public endpoints
-    async def list_events(self, category: str | None = None, status: str | None = "open", keyword: str | None = None, page: int = 1, size: int = 20, trending: bool | None = None):
-        cache_key = ("events", category, status, keyword, page, size, trending)
+    async def list_events(self, category: str | None = None, status: str | None = "open", keyword: str | None = None, page: int = 1, size: int = 20, trending: bool | None = None, series_slug: str | None = None):
+        cache_key = ("events", category, status, keyword, page, size, trending, series_slug)
         if cache_key in self.cache:
             return self.cache[cache_key]
         params = {
@@ -87,6 +158,8 @@ class BayseClient:
         }
         if trending is not None:
             params["trending"] = trending
+        if series_slug:
+            params["seriesSlug"] = series_slug
         data = await self._request("GET", "/pm/events", params=params)
         self.cache[cache_key] = data
         return data
@@ -123,22 +196,52 @@ class BayseClient:
         return await self._request("GET", "/pm/books", params=params)
 
     async def ticker(self, market_id: str, outcome: str | None = None, outcome_id: str | None = None):
+        """
+        Get ticker for a market outcome. Only works on CLOB markets.
+        AMM markets return 400 — we return {} silently in that case.
+        """
         params: Dict[str, Any] = {}
         if outcome:
             params["outcome"] = outcome
         if outcome_id:
             params["outcomeId"] = outcome_id
-        try:
-            return await self._request("GET", f"/pm/markets/{market_id}/ticker", params=params)
-        except httpx.HTTPStatusError:
+        if self.mock_mode:
             return {}
-        except httpx.RequestError:
+        url = f"{self.base_url}/pm/markets/{market_id}/ticker"
+        headers: Dict[str, str] = {}
+        if self.public_key:
+            headers["X-Public-Key"] = self.public_key
+        clean_params = {k: v for k, v in params.items() if v is not None} or None
+        try:
+            resp = await self.client.get(url, params=clean_params, headers=headers)
+            if resp.status_code == 400:
+                return {}  # AMM market — ticker not supported, no noise
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
             return {}
 
     async def trades(self, market_id: str, limit: int = 50):
         return await self._request("GET", "/pm/trades", params={"marketId": market_id, "limit": limit})
 
     # ----- Authenticated reads -----
+    async def get_wallet_balance(self, currency: str | None = None) -> float:
+        """
+        Fetch the actual spendable wallet balance from GET /wallet/assets.
+        Returns the availableBalance for the configured currency (default NGN).
+        This is the real cash balance, not the portfolio market value.
+        """
+        curr = (currency or self.default_currency).upper()
+        try:
+            data = await self._request("GET", "/wallet/assets")
+            assets = (data or {}).get("assets", [])
+            for asset in assets:
+                if asset.get("symbol", "").upper() == curr:
+                    return float(asset.get("availableBalance") or 0.0)
+        except Exception as exc:
+            logger.warning("get_wallet_balance failed: %s", exc)
+        return 0.0
+
     async def get_portfolio(self):
         return await self._request("GET", "/pm/portfolio")
 
@@ -159,25 +262,64 @@ class BayseClient:
         return await self._request("GET", "/wallet/assets")
 
     # ----- Trading (signed) -----
-    async def quote(self, event_id: str, market_id: str, side: str, outcome: str, amount: float, currency: str | None = None):
+    async def quote(self, event_id: str, market_id: str, outcome_id: str, side: str, amount: float, currency: str | None = None):
+        """Get a price quote. outcome_id is the UUID from market.outcome1Id / outcome2Id."""
         body = {
             "side": side,
-            "outcome": outcome,
+            "outcomeId": outcome_id,
             "amount": amount,
             "currency": currency or self.default_currency,
         }
         return await self._request("POST", f"/pm/events/{event_id}/markets/{market_id}/quote", json_body=body)
 
-    async def place_order(self, event_id: str, market_id: str, side: str, outcome: str, amount: float, currency: str = "NGN", price: float | None = None):
-        body = {
+    async def place_order(
+        self,
+        event_id: str,
+        market_id: str,
+        side: str,
+        amount: float,
+        outcome: str = "YES",
+        outcome_id: str | None = None,
+        order_type: str = "MARKET",
+        currency: str = "NGN",
+        price: float | None = None,
+    ):
+        """
+        Place a buy or sell order.
+        Bayse API requires outcomeId (UUID). If not provided, we fetch the event
+        to resolve it from outcome1Id/outcome2Id based on the outcome label.
+        """
+        # Resolve outcomeId if not provided
+        resolved_outcome_id = outcome_id
+        if not resolved_outcome_id:
+            try:
+                ev = await self.get_event(event_id)
+                for m in (ev or {}).get("markets", []):
+                    if m.get("id") == market_id:
+                        resolved_outcome_id = (
+                            m.get("outcome1Id") if outcome.upper() == "YES"
+                            else m.get("outcome2Id")
+                        ) or ""
+                        break
+            except Exception:
+                pass
+
+        body: dict = {
             "side": side,
-            "outcome": outcome,
+            "outcome": outcome.upper() if outcome else "YES",
+            "outcomeId": resolved_outcome_id or "",
             "amount": amount,
+            "type": order_type,
             "currency": currency,
         }
         if price is not None:
             body["price"] = price
-        return await self._request("POST", f"/pm/events/{event_id}/markets/{market_id}/orders", json_body=body, signed=True)
+        return await self._request(
+            "POST",
+            f"/pm/events/{event_id}/markets/{market_id}/orders",
+            json_body=body,
+            signed=True,
+        )
 
     async def cancel_order(self, order_id: str):
         return await self._request("DELETE", f"/pm/orders/{order_id}", signed=True)
@@ -238,7 +380,20 @@ class BayseClient:
                 "tradeGoesOverMaxLiability": False,
             }
         if path.endswith("/orders") and method == "POST":
-            return {"engine": "AMM", "ammOrder": {"id": "mock", "status": "filled"}}
+            return {
+                "engine": "AMM",
+                "order": {
+                    "id": "mock-order-id",
+                    "outcome": (body or {}).get("outcome", (body or {}).get("outcomeId", "YES")),
+                    "side": (body or {}).get("side", "BUY"),
+                    "type": "MARKET",
+                    "status": "filled",
+                    "amount": (body or {}).get("amount", 100),
+                    "price": 0.55,
+                    "quantity": (body or {}).get("amount", 100) / 0.55,
+                    "currency": (body or {}).get("currency", "NGN"),
+                },
+            }
         return {"mock": True}
 
     def _fallback_response(self, path: str, method: str, params: dict | None, body: dict | None):
@@ -254,5 +409,12 @@ class BayseClient:
         return {"data_stale": True}
 
 
+# Module-level singleton so all requests share one HTTP connection pool.
+_bayse_client: BayseClient | None = None
+
+
 def get_bayse_client() -> BayseClient:
-    return BayseClient()
+    global _bayse_client
+    if _bayse_client is None:
+        _bayse_client = BayseClient()
+    return _bayse_client

@@ -7,9 +7,9 @@ export function Settings() {
   const [form, setForm] = useState({
     auto_trade: true,
     categories: "",
-    max_trades_per_hour: 10,
-    max_trades_per_day: 50,
+    max_open_positions: 2,
     balance_floor: 0,
+    min_confidence: 40,
   });
 
   useEffect(() => {
@@ -17,9 +17,9 @@ export function Settings() {
       setForm({
         auto_trade: config.auto_trade,
         categories: (config.categories || []).join(","),
-        max_trades_per_hour: config.max_trades_per_hour,
-        max_trades_per_day: config.max_trades_per_day,
+        max_open_positions: config.max_open_positions,
         balance_floor: config.balance_floor,
+        min_confidence: config.min_confidence ?? 40,
       });
     }
   }, [config]);
@@ -28,13 +28,10 @@ export function Settings() {
     e.preventDefault();
     const payload = {
       auto_trade: form.auto_trade,
-      categories: form.categories
-        .split(",")
-        .map((c) => c.trim())
-        .filter(Boolean),
-      max_trades_per_hour: Number(form.max_trades_per_hour),
-      max_trades_per_day: Number(form.max_trades_per_day),
+      categories: form.categories.split(",").map((c) => c.trim()).filter(Boolean),
+      max_open_positions: Number(form.max_open_positions),
       balance_floor: Number(form.balance_floor),
+      min_confidence: Number(form.min_confidence),
     };
     await save.mutateAsync(payload);
   };
@@ -69,28 +66,17 @@ export function Settings() {
             />
           </div>
 
-          <div className="grid md:grid-cols-2 gap-3">
-            <label className="text-sm flex flex-col gap-1">
-              Max trades per hour
-              <input
-                type="number"
-                min={1}
-                className="bg-[#0F1016] border border-border rounded-lg px-3 py-2"
-                value={form.max_trades_per_hour}
-                onChange={(e) => setForm((f) => ({ ...f, max_trades_per_hour: Number(e.target.value) }))}
-              />
-            </label>
-            <label className="text-sm flex flex-col gap-1">
-              Max trades per day
-              <input
-                type="number"
-                min={1}
-                className="bg-[#0F1016] border border-border rounded-lg px-3 py-2"
-                value={form.max_trades_per_day}
-                onChange={(e) => setForm((f) => ({ ...f, max_trades_per_day: Number(e.target.value) }))}
-              />
-            </label>
-          </div>
+          <label className="text-sm flex flex-col gap-1">
+            Max open positions (simultaneous trades)
+            <input
+              type="number"
+              min={1}
+              className="bg-[#0F1016] border border-border rounded-lg px-3 py-2"
+              value={form.max_open_positions}
+              onChange={(e) => setForm((f) => ({ ...f, max_open_positions: Number(e.target.value) }))}
+            />
+            <span className="text-xs text-muted">Limits how many bets can be live at once.</span>
+          </label>
 
           <div>
             <p className="text-sm text-muted mb-1">Balance floor (stop trading below this)</p>
@@ -102,16 +88,34 @@ export function Settings() {
               onChange={(e) => setForm((f) => ({ ...f, balance_floor: Number(e.target.value) }))}
             />
           </div>
+
+          <label className="text-sm flex flex-col gap-1">
+            Minimum confidence to trade (0–100)
+            <input
+              type="number"
+              min={0}
+              max={100}
+              className="bg-[#0F1016] border border-border rounded-lg px-3 py-2"
+              value={form.min_confidence}
+              onChange={(e) => setForm((f) => ({ ...f, min_confidence: Number(e.target.value) }))}
+            />
+            <span className="text-xs text-muted">Signals below this confidence are blocked.</span>
+          </label>
         </div>
 
         <button
           type="submit"
           className="px-4 py-2 rounded-lg bg-primary text-bg font-semibold hover:bg-primary/90"
-          disabled={save.isLoading}
+          disabled={save.isPending}
         >
-          {save.isLoading ? "Saving..." : "Save settings"}
+          {save.isPending ? "Saving..." : "Save settings"}
         </button>
         {save.isSuccess && <span className="text-secondary text-sm ml-2">Saved</span>}
+
+        <div className="mt-4 text-sm text-muted bg-surface border border-border rounded-xl p-4">
+          <p className="font-semibold text-foreground mb-1">Watchlist focus</p>
+          <p>Agent scans only: BTC 5-minute markets, USD→NGN & GBP→NGN FX markets, and temperature markets in Nigeria. Other events are skipped.</p>
+        </div>
       </form>
     </div>
   );

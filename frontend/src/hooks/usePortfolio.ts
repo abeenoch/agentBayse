@@ -13,5 +13,6 @@ export function usePortfolio() {
         throw err;
       }
     },
+    refetchInterval: 15_000,
   });
 }
