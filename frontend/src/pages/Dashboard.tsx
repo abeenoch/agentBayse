@@ -1,18 +1,53 @@
 import { useMarkets } from "../hooks/useMarkets";
 import { useSignals } from "../hooks/useSignals";
 import { usePortfolio } from "../hooks/usePortfolio";
+import { usePositions } from "../hooks/usePositions";
 import { Modal } from "../components/Modal";
 import { useState } from "react";
 import { useActivities } from "../hooks/useActivities";
+import { useQueryClient } from "@tanstack/react-query";
+import { api } from "../lib/api";
+
+const STATUS_COLORS: Record<string, string> = {
+  PENDING: "bg-yellow-500/20 text-yellow-400",
+  EXECUTED: "bg-blue-500/20 text-blue-400",
+  WON: "bg-secondary/20 text-secondary",
+  LOST: "bg-danger/20 text-danger",
+  SOLD: "bg-purple-500/20 text-purple-400",
+};
+
+const SIGNAL_COLORS: Record<string, string> = {
+  BUY_YES: "text-secondary",
+  BUY_NO: "text-danger",
+  HOLD: "text-yellow-400",
+  AVOID: "text-muted",
+};
 
 export function Dashboard() {
-  const { data: markets } = useMarkets(50, 1);
-  const { data: signals } = useSignals(10);
+  const qc = useQueryClient();
+  const { data: marketsResp, dataUpdatedAt: marketsUpdated } = useMarkets(50, 1);
+  const { data: signalsResp, dataUpdatedAt: signalsUpdated } = useSignals(10, 1, undefined, false);
   const { data: activities } = useActivities(1, 30);
   const { data: portfolio } = usePortfolio();
+  const { data: positionsData, dataUpdatedAt: positionsUpdated } = usePositions();
+  const markets = marketsResp?.events || [];
+  const signals = signalsResp?.signals || [];
+  const positions = positionsData?.positions || [];
   const [selectedSignal, setSelectedSignal] = useState<any | null>(null);
   const [selectedMarket, setSelectedMarket] = useState<any | null>(null);
   const [selectedActivity, setSelectedActivity] = useState<any | null>(null);
+
+  const approve = async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const amount = window.prompt("Stake amount (blank = suggested):");
+    const params: any = { signal_id: id };
+    if (amount) params.amount = Number(amount);
+    await api.post("/agent/approve", null, { params });
+    qc.invalidateQueries({ queryKey: ["signals"] });
+  };
+
+  const pnlPct = portfolio?.portfolioPercentageChange ?? 0;
+  const pnlColor = pnlPct >= 0 ? "text-secondary" : "text-danger";
 
   return (
     <div className="space-y-6">
@@ -21,8 +56,13 @@ export function Dashboard() {
           <p className="text-sm text-muted">Overview</p>
           <h1 className="text-2xl font-semibold">Dashboard</h1>
         </div>
+        <div className="flex items-center gap-2 text-xs text-muted">
+          <span className="w-2 h-2 rounded-full bg-secondary animate-pulse" />
+          Live
+        </div>
       </header>
 
+      {/* Stats row */}
       <div className="grid gap-4 md:grid-cols-3">
         <div className="bg-surface border border-border rounded-xl p-4">
           <p className="text-sm text-muted">Portfolio Value</p>
@@ -31,181 +71,211 @@ export function Dashboard() {
               <p className="text-2xl font-mono font-semibold">
                 ₦{(portfolio?.portfolioCurrentValue ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}
               </p>
-              <p className="text-xs text-muted">Invested ₦{(portfolio?.portfolioCost ?? 0).toLocaleString()}</p>
+              <p className="text-xs text-muted">Cost ₦{(portfolio?.portfolioCost ?? 0).toLocaleString()}</p>
             </>
           ) : (
-            <p className="text-muted text-sm">Login to view</p>
+            <p className="text-muted text-sm">–</p>
           )}
         </div>
         <div className="bg-surface border border-border rounded-xl p-4">
-          <p className="text-sm text-muted">P&L %</p>
+          <p className="text-sm text-muted">P&L</p>
           {portfolio ? (
-            <p className={`text-2xl font-mono font-semibold ${((portfolio?.portfolioPercentageChange ?? 0) >= 0 ? "text-secondary" : "text-danger")}`}>
-              {(portfolio?.portfolioPercentageChange ?? 0).toFixed(2)}%
+            <p className={`text-2xl font-mono font-semibold ${pnlColor}`}>
+              {pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(2)}%
             </p>
           ) : (
-            <p className="text-muted text-sm">Login to view</p>
+            <p className="text-muted text-sm">–</p>
           )}
           <p className="text-xs text-muted">Mark to market</p>
         </div>
         <div className="bg-surface border border-border rounded-xl p-4">
-          <p className="text-sm text-muted">Positions</p>
+          <p className="text-sm text-muted">Open Positions</p>
           {portfolio ? (
             <p className="text-2xl font-mono font-semibold">
               {portfolio?.outcomeBalances?.length ?? 0}
             </p>
           ) : (
-            <p className="text-muted text-sm">Login to view</p>
+            <p className="text-muted text-sm">–</p>
           )}
-          <p className="text-xs text-muted">Open positions</p>
+          <p className="text-xs text-muted">Active bets</p>
         </div>
       </div>
 
       <div className="grid gap-4 md:grid-cols-3">
-        <section className="bg-surface border border-border rounded-xl p-4 col-span-1 md:col-span-1">
+        {/* Signals */}
+        <section className="bg-surface border border-border rounded-xl p-4">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="font-semibold">Latest Signals</h2>
+            <h2 className="font-semibold">Active Bets</h2>
+            <p className="text-xs text-muted">
+              {positionsUpdated ? new Date(positionsUpdated).toLocaleTimeString() : "–"}
+            </p>
           </div>
-          <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
-            {(signals || []).map((s: any) => (
-              <button
-                key={s.id}
-                onClick={() => setSelectedSignal(s)}
-                className="w-full text-left border border-border rounded-lg p-3 bg-[#0F1016] hover:border-primary/60 transition"
-              >
-                <div className="flex justify-between items-center">
-                  <div>
-                    <p className="text-sm text-muted">{s.market_name}</p>
-                    <p className="text-lg font-semibold">{s.signal_type || s.signal}</p>
+          <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+            {positions.map((p: any, i: number) => {
+              const pnl = p.pnl ?? null;
+              const pnlPct = p.pnl_pct ?? null;
+              const pnlColor = pnl == null ? "text-muted" : pnl >= 0 ? "text-secondary" : "text-danger";
+              return (
+                <div
+                  key={p.market_id || i}
+                  className="w-full text-left border border-border rounded-lg p-3 bg-[#0F1016]"
+                >
+                  <div className="flex justify-between items-start">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs text-muted truncate">{p.market_name}</p>
+                      <p className="text-sm font-semibold text-secondary">{p.outcome}</p>
+                    </div>
+                    <div className="text-right ml-2 shrink-0">
+                      {pnl != null && (
+                        <p className={`font-mono text-sm ${pnlColor}`}>
+                          {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}
+                        </p>
+                      )}
+                      {pnlPct != null && (
+                        <p className={`text-xs ${pnlColor}`}>{pnlPct.toFixed(1)}%</p>
+                      )}
+                    </div>
                   </div>
-                  <span className="text-secondary font-mono">{s.expected_value?.toFixed?.(2)} EV</span>
+                  <div className="flex gap-3 mt-1 text-xs text-muted font-mono">
+                    {p.avg_price != null && <span>@ {p.avg_price.toFixed(3)}</span>}
+                    {p.current_value != null && <span>val ₦{p.current_value.toFixed(2)}</span>}
+                    {p.cost != null && <span>cost ₦{p.cost.toFixed(2)}</span>}
+                  </div>
                 </div>
-                <p className="text-sm text-muted mt-2 line-clamp-2">{s.reasoning}</p>
-              </button>
-            ))}
-            {!signals?.length && <p className="text-muted text-sm">No signals yet.</p>}
+              );
+            })}
+            {!positions.length && <p className="text-muted text-sm">No active bets.</p>}
           </div>
         </section>
 
-        <section className="bg-surface border border-border rounded-xl p-4 col-span-1 md:col-span-1">
+        {/* Markets */}
+        <section className="bg-surface border border-border rounded-xl p-4">
           <div className="flex items-center justify-between mb-3">
             <h2 className="font-semibold">Active Markets</h2>
+            <p className="text-xs text-muted">
+              {marketsUpdated ? new Date(marketsUpdated).toLocaleTimeString() : "–"}
+            </p>
           </div>
-          <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
-            {(markets || []).slice(0, 10).map((evt: any) => (
+          <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+            {markets.slice(0, 10).map((evt: any) => (
               <button
                 key={evt.id}
                 onClick={() => setSelectedMarket(evt)}
                 className="w-full flex justify-between border border-border rounded-lg p-3 bg-[#0F1016] hover:border-primary/60 transition text-left"
               >
-                <div>
-                  <p className="text-sm text-muted">{evt.category}</p>
-                  <p className="font-semibold">{evt.title}</p>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs text-muted uppercase">{evt.category}</p>
+                  <p className="font-semibold text-sm truncate">{evt.title}</p>
                 </div>
-                <div className="text-right">
-                  <p className="text-secondary font-mono">{evt.liquidity ?? "--"} liq</p>
-                  <p className="text-muted text-xs">vol {evt.totalVolume ?? "--"}</p>
+                <div className="text-right ml-2 shrink-0">
+                  <p className="text-secondary font-mono text-xs">{evt.markets?.[0]?.outcome1Price?.toFixed(2) ?? "--"}</p>
+                  <p className="text-danger font-mono text-xs">{evt.markets?.[0]?.outcome2Price?.toFixed(2) ?? "--"}</p>
                 </div>
               </button>
             ))}
-            {!markets?.length && <p className="text-muted text-sm">No markets loaded.</p>}
+            {!markets.length && <p className="text-muted text-sm">No markets loaded.</p>}
           </div>
         </section>
 
-        <section className="bg-surface border border-border rounded-xl p-4 col-span-1 md:col-span-1">
+        {/* Activity */}
+        <section className="bg-surface border border-border rounded-xl p-4">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="font-semibold">Prediction History</h2>
+            <h2 className="font-semibold">Activity</h2>
           </div>
-          <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
+          <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
             {(activities || []).map((a: any) => (
               <button
                 key={a.id}
                 onClick={() => setSelectedActivity(a)}
                 className="w-full text-left border border-border rounded-lg p-3 bg-[#0F1016] hover:border-primary/60 transition"
               >
-                <div className="flex justify-between">
-                  <div>
-                    <p className="text-sm text-muted">{a.marketTitle || a.eventTitle}</p>
-                    <p className="font-semibold">{a.type}</p>
+                <div className="flex justify-between items-start">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs text-muted truncate">{a.marketTitle || a.eventTitle}</p>
+                    <p className="text-sm font-semibold">{a.type?.replace(/_/g, " ")}</p>
                   </div>
-                  <span className="text-secondary font-mono">{a.amount ?? a.totalCost ?? "--"}</span>
+                  <span className="text-secondary font-mono text-xs ml-2 shrink-0">
+                    {a.amount ?? a.totalCost ?? "--"}
+                  </span>
                 </div>
                 <p className="text-xs text-muted mt-1">
-                  {a.createdAt ? new Date(a.createdAt).toLocaleString() : ""}
+                  {a.createdAt ? new Date(a.createdAt).toLocaleTimeString() : ""}
                 </p>
               </button>
             ))}
-            {!activities?.length && <p className="text-muted text-sm">No history yet.</p>}
+            {!(activities?.length) && <p className="text-muted text-sm">No activity yet.</p>}
           </div>
         </section>
       </div>
 
-      <Modal
-        open={!!selectedSignal}
-        onClose={() => setSelectedSignal(null)}
-        title={selectedSignal?.market_name}
-      >
+      {/* Modals */}
+      <Modal open={!!selectedSignal} onClose={() => setSelectedSignal(null)} title={selectedSignal?.market_name}>
         {selectedSignal && (
-          <div className="space-y-2">
-            <p className="text-sm text-muted">Signal: {selectedSignal.signal_type || selectedSignal.signal}</p>
-            <p className="text-sm">Confidence: {selectedSignal.confidence}%</p>
-            <p className="text-sm">EV: {selectedSignal.expected_value?.toFixed?.(2)}</p>
-            <p className="text-sm">Prob: {(selectedSignal.estimated_probability * 100)?.toFixed?.(1)}%</p>
-            <p className="text-sm">Stake: {selectedSignal.suggested_stake}</p>
-            <p className="text-sm">Risk: {selectedSignal.risk_level}</p>
-            <p className="text-sm">Reasoning: {selectedSignal.reasoning}</p>
-            {selectedSignal.sources?.length ? (
+          <div className="space-y-2 text-sm">
+            <div className="flex gap-2 flex-wrap">
+              <span className={`px-2 py-1 rounded text-xs font-semibold ${SIGNAL_COLORS[selectedSignal.signal_type || selectedSignal.signal] ?? ""}`}>
+                {selectedSignal.signal_type || selectedSignal.signal}
+              </span>
+              <span className={`px-2 py-1 rounded text-xs ${STATUS_COLORS[selectedSignal.status] ?? "bg-border/40 text-muted"}`}>
+                {selectedSignal.status}
+              </span>
+            </div>
+            <p>Confidence: <span className="font-mono">{selectedSignal.confidence}%</span></p>
+            <p>EV: <span className="font-mono text-secondary">{selectedSignal.expected_value?.toFixed?.(2)}</span></p>
+            <p>Probability: <span className="font-mono">{(selectedSignal.estimated_probability * 100)?.toFixed?.(1)}%</span></p>
+            <p>Stake: <span className="font-mono">₦{selectedSignal.suggested_stake}</span></p>
+            <p>Risk: {selectedSignal.risk_level}</p>
+            <p className="text-muted">{selectedSignal.reasoning}</p>
+            {selectedSignal.sources?.length > 0 && (
               <div className="text-xs text-muted">
-                Sources:
-                <ul className="list-disc ml-4">
+                <p className="font-semibold mb-1">Sources</p>
+                <ul className="list-disc ml-4 space-y-0.5">
                   {selectedSignal.sources.map((u: string) => (
-                    <li key={u}>{u}</li>
+                    <li key={u}><a href={u} target="_blank" rel="noreferrer" className="hover:text-primary underline">{u}</a></li>
                   ))}
                 </ul>
               </div>
-            ) : null}
+            )}
+            {selectedSignal.status === "PENDING" && (
+              <button
+                onClick={(e) => { approve(selectedSignal.id, e); setSelectedSignal(null); }}
+                className="px-4 py-2 rounded-lg bg-primary/20 text-primary hover:bg-primary/30 text-sm"
+              >
+                Approve & Execute
+              </button>
+            )}
           </div>
         )}
       </Modal>
 
-      <Modal
-        open={!!selectedMarket}
-        onClose={() => setSelectedMarket(null)}
-        title={selectedMarket?.title}
-      >
+      <Modal open={!!selectedMarket} onClose={() => setSelectedMarket(null)} title={selectedMarket?.title}>
         {selectedMarket && (
-          <div className="space-y-2">
-            <p className="text-sm text-muted">Category: {selectedMarket.category}</p>
-            <p className="text-sm">Liquidity: {selectedMarket.liquidity}</p>
-            <p className="text-sm">Volume: {selectedMarket.totalVolume}</p>
+          <div className="space-y-2 text-sm">
+            <p className="text-muted uppercase text-xs">{selectedMarket.category}</p>
+            <p>Liquidity: <span className="font-mono">{selectedMarket.liquidity ?? "--"}</span></p>
+            <p>Volume: <span className="font-mono">{selectedMarket.totalVolume ?? "--"}</span></p>
             {selectedMarket.markets?.[0] && (
-              <div className="text-sm">
-                <p>YES: {selectedMarket.markets[0].outcome1Price}</p>
-                <p>NO: {selectedMarket.markets[0].outcome2Price}</p>
+              <div className="flex gap-4 font-mono">
+                <span className="text-secondary">YES {selectedMarket.markets[0].outcome1Price}</span>
+                <span className="text-danger">NO {selectedMarket.markets[0].outcome2Price}</span>
               </div>
             )}
-            {selectedMarket.description && <p className="text-sm">{selectedMarket.description}</p>}
+            {selectedMarket.description && <p className="text-muted">{selectedMarket.description}</p>}
           </div>
         )}
       </Modal>
 
-      <Modal
-        open={!!selectedActivity}
-        onClose={() => setSelectedActivity(null)}
-        title={selectedActivity?.marketTitle || selectedActivity?.eventTitle}
-      >
+      <Modal open={!!selectedActivity} onClose={() => setSelectedActivity(null)} title={selectedActivity?.marketTitle || selectedActivity?.eventTitle}>
         {selectedActivity && (
-          <div className="space-y-2">
-            <p className="text-sm text-muted">Type: {selectedActivity.type}</p>
-            <p className="text-sm">Amount: {selectedActivity.amount}</p>
-            <p className="text-sm">Size: {selectedActivity.size}</p>
-            <p className="text-sm">Price: {selectedActivity.price}</p>
-            <p className="text-sm">Status: {selectedActivity.status}</p>
-            <p className="text-sm">Outcome: {selectedActivity.outcome}</p>
-            {selectedActivity.payout && <p className="text-sm">Payout: {selectedActivity.payout}</p>}
-            <p className="text-sm text-muted">
-              {selectedActivity.createdAt ? new Date(selectedActivity.createdAt).toLocaleString() : ""}
-            </p>
+          <div className="space-y-2 text-sm">
+            <p>Type: {selectedActivity.type?.replace(/_/g, " ")}</p>
+            <p>Amount: <span className="font-mono">{selectedActivity.amount}</span></p>
+            <p>Size: <span className="font-mono">{selectedActivity.size}</span></p>
+            <p>Price: <span className="font-mono">{selectedActivity.price}</span></p>
+            <p>Status: {selectedActivity.status}</p>
+            <p>Outcome: {selectedActivity.outcome}</p>
+            {selectedActivity.payout && <p>Payout: <span className="font-mono text-secondary">{selectedActivity.payout}</span></p>}
+            <p className="text-muted text-xs">{selectedActivity.createdAt ? new Date(selectedActivity.createdAt).toLocaleString() : ""}</p>
           </div>
         )}
       </Modal>

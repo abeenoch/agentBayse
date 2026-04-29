@@ -14,18 +14,18 @@ async def list_markets(
     size: int = 50,
     client: BayseClient = Depends(get_bayse_client),
 ):
-    return await client.list_events(category=category, status=status, keyword=keyword, page=page, size=size)
+    # Enforce finance-only scope by default so stray callers don't pull other categories.
+    effective_category = category or "finance"
+    return await client.list_events(
+        category=effective_category,
+        status=status,
+        keyword=keyword,
+        page=page,
+        size=size,
+    )
 
 
-@router.get("/{event_id}")
-async def get_event(event_id: str, client: BayseClient = Depends(get_bayse_client)):
-    return await client.get_event(event_id)
-
-
-@router.get("/slug/{slug}")
-async def get_event_by_slug(slug: str, client: BayseClient = Depends(get_bayse_client)):
-    return await client.get_event_by_slug(slug)
-
+# doesn't swallow them as path-param matches.
 
 @router.get("/trending")
 async def trending(client: BayseClient = Depends(get_bayse_client)):
@@ -35,6 +35,20 @@ async def trending(client: BayseClient = Depends(get_bayse_client)):
 @router.get("/series")
 async def list_series(page: int = 1, size: int = 50, client: BayseClient = Depends(get_bayse_client)):
     return await client.list_series(page=page, size=size)
+
+
+@router.get("/orderbook")
+async def order_book(
+    outcomeIds: list[str] = Query(..., alias="outcomeId[]"),
+    depth: int = 10,
+    client: BayseClient = Depends(get_bayse_client),
+):
+    return await client.order_book(outcomeIds, depth=depth)
+
+
+@router.get("/slug/{slug}")
+async def get_event_by_slug(slug: str, client: BayseClient = Depends(get_bayse_client)):
+    return await client.get_event_by_slug(slug)
 
 
 @router.get("/{event_id}/price-history")
@@ -49,15 +63,6 @@ async def price_history(
     if marketIds:
         return {mid: data.get(mid, []) for mid in marketIds}
     return data
-
-
-@router.get("/orderbook")
-async def order_book(
-    outcomeIds: list[str] = Query(..., alias="outcomeId[]"),
-    depth: int = 10,
-    client: BayseClient = Depends(get_bayse_client),
-):
-    return await client.order_book(outcomeIds, depth=depth)
 
 
 @router.get("/{market_id}/ticker")
@@ -77,3 +82,8 @@ async def recent_trades(
     client: BayseClient = Depends(get_bayse_client),
 ):
     return await client.trades(market_id, limit=limit)
+
+
+@router.get("/{event_id}")
+async def get_event(event_id: str, client: BayseClient = Depends(get_bayse_client)):
+    return await client.get_event(event_id)

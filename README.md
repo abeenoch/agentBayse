@@ -23,7 +23,7 @@ npm run dev   # http://localhost:5173
 
 Key env flags (backend/.env):
 - `BAYSE_API_BASE_URL` (default `https://relay.bayse.markets/v1`)
-- `BAYSE_PUBLIC_KEY`, `BAYSE_SECRET_KEY`, `BAYSE_DEFAULT_CURRENCY`
+- `BAYSE_PUBLIC_KEY`, `BAYSE_PRIVATE_KEY`, `BAYSE_DEFAULT_CURRENCY`
 - `AI_PROVIDER=groq|gemini|mock`, plus `GROQ_API_KEY` or `GEMINI_API_KEY`
 - `TAVILY_API_KEY` for real web search
 - `MOCK_MODE` (false for live Bayse)

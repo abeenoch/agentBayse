@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import init_db
 from app.services.scheduler import start_scheduler
-from app.routers import auth, markets, trades, portfolio, agent, search, websocket
+from app.routers import auth, markets, trades, portfolio, agent, search, websocket, webhook
 
 
 def create_app() -> FastAPI:
@@ -25,6 +25,7 @@ def create_app() -> FastAPI:
     app.include_router(agent.router, prefix="/agent", tags=["agent"])
     app.include_router(search.router, prefix="/search", tags=["search"])
     app.include_router(websocket.router, tags=["websocket"])
+    app.include_router(webhook.router, prefix="/webhook", tags=["webhook"])
 
     @app.on_event("startup")
     async def startup_event():
