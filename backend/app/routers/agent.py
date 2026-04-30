@@ -116,6 +116,7 @@ async def read_config(session: AsyncSession = Depends(get_session)):
         "max_open_positions": cfg.max_open_positions,
         "balance_floor": cfg.balance_floor,
         "min_confidence": cfg.min_confidence,
+        "balance_reserve_pct": getattr(cfg, "balance_reserve_pct", 0.30),
     }
 
 
@@ -130,4 +131,5 @@ async def write_config(payload: dict, session: AsyncSession = Depends(get_sessio
         "max_open_positions": cfg.max_open_positions,
         "balance_floor": cfg.balance_floor,
         "min_confidence": cfg.min_confidence,
+        "balance_reserve_pct": getattr(cfg, "balance_reserve_pct", 0.30),
     }

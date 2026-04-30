@@ -6,34 +6,33 @@ export function Settings() {
   const save = useSaveAgentConfig();
   const [form, setForm] = useState({
     auto_trade: true,
-    categories: "",
-    max_open_positions: 2,
+    max_open_positions: 3,
     balance_floor: 0,
-    min_confidence: 40,
+    min_confidence: 65,
+    balance_reserve_pct: 0.30,
   });
 
   useEffect(() => {
     if (config) {
       setForm({
         auto_trade: config.auto_trade,
-        categories: (config.categories || []).join(","),
         max_open_positions: config.max_open_positions,
         balance_floor: config.balance_floor,
-        min_confidence: config.min_confidence ?? 40,
+        min_confidence: config.min_confidence ?? 65,
+        balance_reserve_pct: config.balance_reserve_pct ?? 0.30,
       });
     }
   }, [config]);
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const payload = {
+    await save.mutateAsync({
       auto_trade: form.auto_trade,
-      categories: form.categories.split(",").map((c) => c.trim()).filter(Boolean),
       max_open_positions: Number(form.max_open_positions),
       balance_floor: Number(form.balance_floor),
       min_confidence: Number(form.min_confidence),
-    };
-    await save.mutateAsync(payload);
+      balance_reserve_pct: Number(form.balance_reserve_pct),
+    });
   };
 
   return (
@@ -46,75 +45,83 @@ export function Settings() {
       {isLoading && <p className="text-muted">Loading...</p>}
 
       <form className="space-y-4" onSubmit={onSubmit}>
-        <div className="bg-surface border border-border rounded-xl p-4 space-y-3">
-          <label className="flex items-center gap-3">
+        <div className="bg-surface border border-border rounded-xl p-4 space-y-4">
+
+          <label className="flex items-center gap-3 cursor-pointer">
             <input
               type="checkbox"
               checked={form.auto_trade}
               onChange={(e) => setForm((f) => ({ ...f, auto_trade: e.target.checked }))}
+              className="w-4 h-4"
             />
-            <span>Enable autonomous trading</span>
+            <div>
+              <p className="font-medium">Autonomous trading</p>
+              <p className="text-xs text-muted">Agent places bets automatically when signals pass all checks.</p>
+            </div>
           </label>
 
-          <div>
-            <p className="text-sm text-muted mb-1">Categories to scan (comma separated, empty = all)</p>
-            <input
-              className="w-full bg-[#0F1016] border border-border rounded-lg px-3 py-2"
-              value={form.categories}
-              onChange={(e) => setForm((f) => ({ ...f, categories: e.target.value }))}
-              placeholder="sports,crypto,politics"
-            />
-          </div>
-
           <label className="text-sm flex flex-col gap-1">
-            Max open positions (simultaneous trades)
+            <span className="font-medium">Max simultaneous bets</span>
             <input
               type="number"
               min={1}
-              className="bg-[#0F1016] border border-border rounded-lg px-3 py-2"
+              max={10}
+              className="bg-[#0F1016] border border-border rounded-lg px-3 py-2 w-32"
               value={form.max_open_positions}
               onChange={(e) => setForm((f) => ({ ...f, max_open_positions: Number(e.target.value) }))}
             />
-            <span className="text-xs text-muted">Limits how many bets can be live at once.</span>
+            <span className="text-xs text-muted">How many open bets allowed at once. Recommended: 3.</span>
           </label>
 
-          <div>
-            <p className="text-sm text-muted mb-1">Balance floor (stop trading below this)</p>
-            <input
-              type="number"
-              min={0}
-              className="bg-[#0F1016] border border-border rounded-lg px-3 py-2"
-              value={form.balance_floor}
-              onChange={(e) => setForm((f) => ({ ...f, balance_floor: Number(e.target.value) }))}
-            />
-          </div>
-
           <label className="text-sm flex flex-col gap-1">
-            Minimum confidence to trade (0–100)
+            <span className="font-medium">Minimum confidence to trade (%)</span>
             <input
               type="number"
               min={0}
               max={100}
-              className="bg-[#0F1016] border border-border rounded-lg px-3 py-2"
+              className="bg-[#0F1016] border border-border rounded-lg px-3 py-2 w-32"
               value={form.min_confidence}
               onChange={(e) => setForm((f) => ({ ...f, min_confidence: Number(e.target.value) }))}
             />
-            <span className="text-xs text-muted">Signals below this confidence are blocked.</span>
+            <span className="text-xs text-muted">Signals below this are blocked. Recommended: 65.</span>
+          </label>
+
+          <label className="text-sm flex flex-col gap-1">
+            <span className="font-medium">Balance reserve (%)</span>
+            <input
+              type="number"
+              min={0}
+              max={0.9}
+              step={0.05}
+              className="bg-[#0F1016] border border-border rounded-lg px-3 py-2 w-32"
+              value={form.balance_reserve_pct}
+              onChange={(e) => setForm((f) => ({ ...f, balance_reserve_pct: Number(e.target.value) }))}
+            />
+            <span className="text-xs text-muted">Fraction of wallet kept untouched. 0.30 = keep 30% back.</span>
+          </label>
+
+          <label className="text-sm flex flex-col gap-1">
+            <span className="font-medium">Balance floor (₦)</span>
+            <input
+              type="number"
+              min={0}
+              className="bg-[#0F1016] border border-border rounded-lg px-3 py-2 w-32"
+              value={form.balance_floor}
+              onChange={(e) => setForm((f) => ({ ...f, balance_floor: Number(e.target.value) }))}
+            />
+            <span className="text-xs text-muted">Stop all trading if wallet drops below this amount.</span>
           </label>
         </div>
 
-        <button
-          type="submit"
-          className="px-4 py-2 rounded-lg bg-primary text-bg font-semibold hover:bg-primary/90"
-          disabled={save.isPending}
-        >
-          {save.isPending ? "Saving..." : "Save settings"}
-        </button>
-        {save.isSuccess && <span className="text-secondary text-sm ml-2">Saved</span>}
-
-        <div className="mt-4 text-sm text-muted bg-surface border border-border rounded-xl p-4">
-          <p className="font-semibold text-foreground mb-1">Watchlist focus</p>
-          <p>Agent scans only: BTC 5-minute markets, USD→NGN & GBP→NGN FX markets, and temperature markets in Nigeria. Other events are skipped.</p>
+        <div className="flex items-center gap-3">
+          <button
+            type="submit"
+            className="px-4 py-2 rounded-lg bg-primary text-bg font-semibold hover:bg-primary/90"
+            disabled={save.isPending}
+          >
+            {save.isPending ? "Saving..." : "Save settings"}
+          </button>
+          {save.isSuccess && <span className="text-secondary text-sm">Saved ✓</span>}
         </div>
       </form>
     </div>

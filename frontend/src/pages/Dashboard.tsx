@@ -2,6 +2,7 @@ import { useMarkets } from "../hooks/useMarkets";
 import { useSignals } from "../hooks/useSignals";
 import { usePortfolio } from "../hooks/usePortfolio";
 import { usePositions } from "../hooks/usePositions";
+import { useWalletBalance } from "../hooks/useWalletBalance";
 import { Modal } from "../components/Modal";
 import { useState } from "react";
 import { useActivities } from "../hooks/useActivities";
@@ -30,6 +31,7 @@ export function Dashboard() {
   const { data: activities } = useActivities(1, 30);
   const { data: portfolio } = usePortfolio();
   const { data: positionsData, dataUpdatedAt: positionsUpdated } = usePositions();
+  const { data: walletBalance } = useWalletBalance();
   const markets = marketsResp?.events || [];
   const signals = signalsResp?.signals || [];
   const positions = positionsData?.positions || [];
@@ -65,13 +67,15 @@ export function Dashboard() {
       {/* Stats row */}
       <div className="grid gap-4 md:grid-cols-3">
         <div className="bg-surface border border-border rounded-xl p-4">
-          <p className="text-sm text-muted">Portfolio Value</p>
-          {portfolio ? (
+          <p className="text-sm text-muted">Wallet Balance</p>
+          {walletBalance != null ? (
             <>
               <p className="text-2xl font-mono font-semibold">
-                ₦{(portfolio?.portfolioCurrentValue ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                ₦{walletBalance.toLocaleString(undefined, { maximumFractionDigits: 2 })}
               </p>
-              <p className="text-xs text-muted">Cost ₦{(portfolio?.portfolioCost ?? 0).toLocaleString()}</p>
+              <p className="text-xs text-muted">
+                In positions: ₦{(portfolio?.portfolioCost ?? 0).toLocaleString()}
+              </p>
             </>
           ) : (
             <p className="text-muted text-sm">–</p>
@@ -112,34 +116,44 @@ export function Dashboard() {
           </div>
           <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
             {positions.map((p: any, i: number) => {
-              const pnl = p.pnl ?? null;
-              const pnlPct = p.pnl_pct ?? null;
-              const pnlColor = pnl == null ? "text-muted" : pnl >= 0 ? "text-secondary" : "text-danger";
+              const cost = p.cost ?? null;
+              const currentVal = p.current_value ?? null;
+              const pnlAbs = (cost != null && currentVal != null) ? currentVal - cost : p.pnl ?? null;
+              const pnlPct = (cost != null && cost > 0 && pnlAbs != null)
+                ? (pnlAbs / cost) * 100
+                : p.pnl_pct ?? null;
+              const isUp = pnlAbs != null && pnlAbs >= 0;
+              const pnlColor = pnlAbs == null ? "text-muted" : isUp ? "text-secondary" : "text-danger";
+              const outcomeColor = (p.outcome || "").toUpperCase().includes("YES") ? "text-secondary" : "text-danger";
+
               return (
                 <div
                   key={p.market_id || i}
                   className="w-full text-left border border-border rounded-lg p-3 bg-[#0F1016]"
                 >
-                  <div className="flex justify-between items-start">
+                  <div className="flex justify-between items-start gap-2">
                     <div className="flex-1 min-w-0">
                       <p className="text-xs text-muted truncate">{p.market_name}</p>
-                      <p className="text-sm font-semibold text-secondary">{p.outcome}</p>
+                      <span className={`text-xs font-bold px-1.5 py-0.5 rounded bg-border/40 ${outcomeColor}`}>
+                        {(p.outcome || "").toUpperCase()}
+                      </span>
                     </div>
-                    <div className="text-right ml-2 shrink-0">
-                      {pnl != null && (
-                        <p className={`font-mono text-sm ${pnlColor}`}>
-                          {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}
+                    <div className="text-right shrink-0">
+                      {pnlAbs != null && (
+                        <p className={`font-mono text-sm font-semibold ${pnlColor}`}>
+                          {isUp ? "+" : ""}₦{pnlAbs.toFixed(2)}
                         </p>
                       )}
                       {pnlPct != null && (
-                        <p className={`text-xs ${pnlColor}`}>{pnlPct.toFixed(1)}%</p>
+                        <p className={`text-xs font-mono ${pnlColor}`}>
+                          {isUp ? "+" : ""}{pnlPct.toFixed(1)}%
+                        </p>
                       )}
                     </div>
                   </div>
-                  <div className="flex gap-3 mt-1 text-xs text-muted font-mono">
-                    {p.avg_price != null && <span>@ {p.avg_price.toFixed(3)}</span>}
-                    {p.current_value != null && <span>val ₦{p.current_value.toFixed(2)}</span>}
-                    {p.cost != null && <span>cost ₦{p.cost.toFixed(2)}</span>}
+                  <div className="flex justify-between mt-2 text-xs text-muted font-mono">
+                    <span>Staked: <span className="text-text">₦{cost?.toFixed(2) ?? "–"}</span></span>
+                    <span>Now: <span className="text-text">₦{currentVal?.toFixed(2) ?? "–"}</span></span>
                   </div>
                 </div>
               );
@@ -194,9 +208,18 @@ export function Dashboard() {
                     <p className="text-xs text-muted truncate">{a.marketTitle || a.eventTitle}</p>
                     <p className="text-sm font-semibold">{a.type?.replace(/_/g, " ")}</p>
                   </div>
-                  <span className="text-secondary font-mono text-xs ml-2 shrink-0">
-                    {a.amount ?? a.totalCost ?? "--"}
-                  </span>
+                  <div className="text-right ml-2 shrink-0">
+                    <span className="text-secondary font-mono text-xs block">
+                      {a.amount ?? a.totalCost ?? "--"}
+                    </span>
+                    {a.outcome && (
+                      <span className={`text-xs font-bold ${
+                        String(a.outcome).toUpperCase() === "YES" ? "text-secondary" : "text-danger"
+                      }`}>
+                        {String(a.outcome).toUpperCase()}
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <p className="text-xs text-muted mt-1">
                   {a.createdAt ? new Date(a.createdAt).toLocaleTimeString() : ""}

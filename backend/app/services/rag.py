@@ -108,12 +108,27 @@ async def ingest_market(topic: str, snippets: list[dict]) -> int:
 
     docs, ids, metas = [], [], []
 
+    # Filter out forecast/prediction sites — they poison the RAG with irrelevant long-term data
+    FORECAST_DOMAINS = {
+        "coincodex.com", "walletinvestor.com", "digitalcoinprice.com",
+        "cryptopredictions.com", "longforecast.com", "gov.capital",
+        "priceprediction.net", "tradingbeasts.com", "previsioni-forex.com",
+        "fxstreet.com/forecasts", "investing.com/analysis",
+    }
+
+    def _is_forecast_url(url: str) -> bool:
+        url_lower = url.lower()
+        return any(d in url_lower for d in FORECAST_DOMAINS) or "forecast" in url_lower or "prediction" in url_lower
+
     # Scrape URLs concurrently (cap at 5 to avoid hammering)
-    urls = [r.get("url", "") for r in snippets if r.get("url")][:5]
+    urls = [r.get("url", "") for r in snippets if r.get("url") and not _is_forecast_url(r.get("url", ""))][:5]
     scraped = await asyncio.gather(*[_scrape_url(u) for u in urls], return_exceptions=True)
 
     for i, result in enumerate(snippets):
         url = result.get("url", "")
+        # Skip forecast/prediction content
+        if _is_forecast_url(url):
+            continue
         base_text = result.get("snippet") or result.get("title") or ""
 
         # Add snippet as a chunk

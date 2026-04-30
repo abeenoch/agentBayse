@@ -56,6 +56,15 @@ def risk_guard(signal: dict, portfolio: dict, cfg=None) -> RiskCheckResult:
     if signal.get("expected_value") is not None and signal["expected_value"] < 0:
         reasons.append("non-positive EV")
 
+    # EV must exceed the flat ₦5 Bayse fee as a percentage of stake
+    # e.g. ₦100 stake → need EV > 5, ₦500 stake → need EV > 1, ₦1000 → need EV > 0.5
+    stake = signal.get("suggested_stake") or 100.0
+    bayse_fee = 5.0
+    min_ev = (bayse_fee / max(stake, 1.0)) * 100  # as % of stake, scaled to EV units
+    ev = signal.get("expected_value")
+    if ev is not None and 0 <= ev < min_ev:
+        reasons.append(f"EV too low ({ev:.2f} < {min_ev:.2f} needed to cover ₦5 fee on ₦{stake:.0f} stake)")
+
     if signal.get("confidence", 0) < min_conf:
         reasons.append("low confidence")
 
