@@ -9,8 +9,9 @@ from app.services.trade_executor import execute_signal
 from app.models.signal import Signal
 from app.services.bayse_client import get_bayse_client
 from app.services.config_service import get_config, update_config
+from app.dependencies import get_current_user
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_user)])
 
 
 @router.post("/analyze")

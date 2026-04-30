@@ -1,6 +1,9 @@
 
+import secrets
+
 from fastapi import APIRouter, Header, HTTPException, Request
 
+from app.config import settings
 from app.database import AsyncSessionLocal
 from app.models.signal import Signal
 from app.models.trade import Trade
@@ -12,7 +15,7 @@ router = APIRouter()
 
 
 @router.post("/order")
-async def order_webhook(request: Request):
+async def order_webhook(request: Request, x_webhook_secret: str | None = Header(None, alias="X-Webhook-Secret")):
     """
     Receive order resolution event from Bayse.
     Expected payload (best-effort — handle whatever Bayse sends):
@@ -28,6 +31,11 @@ async def order_webhook(request: Request):
         payload = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    if not settings.webhook_secret:
+        raise HTTPException(status_code=503, detail="Webhook secret not configured")
+    if not x_webhook_secret or not secrets.compare_digest(x_webhook_secret, settings.webhook_secret):
+        raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
     order_id = (
         payload.get("orderId")

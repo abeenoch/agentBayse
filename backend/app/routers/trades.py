@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.services.bayse_client import BayseClient, get_bayse_client
+from app.dependencies import get_current_user
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_user)])
 
 
 @router.post("")

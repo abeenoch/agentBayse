@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends
 
 from app.services.bayse_client import BayseClient, get_bayse_client
+from app.dependencies import get_current_user
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_user)])
 
 
 @router.get("")
@@ -59,4 +60,3 @@ async def get_open_positions(
 @router.get("/assets")
 async def get_assets(client: BayseClient = Depends(get_bayse_client)):
     return await client.get_assets()
-
