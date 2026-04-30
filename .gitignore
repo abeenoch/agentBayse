@@ -21,6 +21,8 @@ frontend/.turbo/
 *.env
 backend/bayse_agent.db
 backend/*.sqlite
+backend/chroma_db/
+docs/
 
 # Caches
 .pytest_cache/

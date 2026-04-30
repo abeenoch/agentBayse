@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { clearAccessToken, getAccessToken } from "../lib/auth";
 
 const WS_URL = (import.meta.env.VITE_API_URL || "http://localhost:8000")
   .replace(/^http/, "ws") + "/ws/live";
@@ -11,9 +12,13 @@ export function useWebSocket() {
   const attempt = useRef(0);
 
   const connect = useCallback(() => {
+    const token = getAccessToken();
+    if (!token) return;
     if (ws.current?.readyState === WebSocket.OPEN) return;
 
-    const socket = new WebSocket(WS_URL);
+    const socketUrl = new URL(WS_URL);
+    socketUrl.searchParams.set("token", token);
+    const socket = new WebSocket(socketUrl.toString());
     ws.current = socket;
 
     socket.onopen = () => {
@@ -40,7 +45,15 @@ export function useWebSocket() {
       } catch {}
     };
 
-    socket.onclose = () => {
+    socket.onclose = (event) => {
+      if (event.code === 1008) {
+        clearAccessToken();
+        if (typeof window !== "undefined" && window.location.pathname !== "/login") {
+          window.location.assign("/login");
+        }
+        return;
+      }
+      if (!getAccessToken()) return;
       const delay = Math.min(1000 * 2 ** attempt.current, 30_000);
       attempt.current++;
       reconnectTimer.current = setTimeout(connect, delay);

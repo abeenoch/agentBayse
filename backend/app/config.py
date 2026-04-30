@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     app_secret_key: str = Field(..., env="APP_SECRET_KEY")
     admin_username: str = Field(..., env="ADMIN_USERNAME")
     admin_password: str = Field(..., env="ADMIN_PASSWORD")
+    jwt_issuer: str = Field("bayse-agent", env="JWT_ISSUER")
+    jwt_audience: str = Field("bayse-agent-web", env="JWT_AUDIENCE")
     jwt_algorithm: str = Field("HS256", env="JWT_ALGORITHM")
     access_token_expire_minutes: int = Field(1440, env="ACCESS_TOKEN_EXPIRE_MINUTES")
 
@@ -54,6 +56,7 @@ class Settings(BaseSettings):
     )
 
     frontend_origin: str = Field("http://localhost:5173", env="FRONTEND_ORIGIN")
+    webhook_secret: str = Field("", env="WEBHOOK_SECRET")
 
     mock_mode: bool = Field(True, env="MOCK_MODE")
 

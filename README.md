@@ -40,8 +40,11 @@ The backend reads settings from `backend/.env` through `pydantic-settings`.
 - `APP_SECRET_KEY`
 - `ADMIN_USERNAME`
 - `ADMIN_PASSWORD`
+- `JWT_ISSUER` - defaults to `bayse-agent`
+- `JWT_AUDIENCE` - defaults to `bayse-agent-web`
 - `DATABASE_URL` - defaults to PostgreSQL at `postgresql+asyncpg://postgres:postgres@localhost:5432/agent_bayse`
 - `FRONTEND_ORIGIN` - defaults to `http://localhost:5173`
+- `WEBHOOK_SECRET`
 - `MOCK_MODE` - defaults to `true`
 
 ### Bayse
@@ -106,6 +109,7 @@ Base URL: `http://localhost:8000`
 
 - `POST /auth/token` - OAuth2 password login using `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
 - `GET /auth/me` - returns the current username when a bearer token is present.
+- Protected routes require `Authorization: Bearer <token>` after login.
 
 ### Markets
 
@@ -156,6 +160,7 @@ Note: when `category` is omitted, the backend defaults the markets list to `fina
 ### Webhook
 
 - `POST /webhook/order` - Bayse order resolution webhook used to update trade and signal state.
+- Requires `X-Webhook-Secret` to match `WEBHOOK_SECRET`.
 
 ## How the agent works
 
@@ -199,8 +204,13 @@ npm run build
 ## Notes
 
 - `MOCK_MODE=true` keeps the Bayse client and LLM flow offline-friendly for local development.
+- In non-mock deployments, set `WEBHOOK_SECRET` so the order webhook is accepted.
+- The UI now shows a login screen and stores the bearer token locally after `POST /auth/token`.
 - The `Signals` page still calls `POST /agent/signals/clear`, but the backend currently exposes `POST /agent/trades/clear-stale` instead. If you want a clear-signals action, that endpoint needs to be added or the UI needs to be updated.
 - The backend markets endpoint only defaults to `finance` when no category is supplied. The frontend can still request other categories explicitly.
+- Security review documents:
+  - [Audit report](docs/security-audit-report.md)
+  - [Remediation plan](docs/remediation-plan.md)
 
 ## Troubleshooting
 
