@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     agent_max_position_size: float = Field(5000.0, env="AGENT_MAX_POSITION_SIZE")
     agent_scan_interval_seconds: int = Field(900, env="AGENT_SCAN_INTERVAL_SECONDS")
     agent_max_daily_trades: int = Field(20, env="AGENT_MAX_DAILY_TRADES")
-    agent_min_confidence: int = Field(20, env="AGENT_MIN_CONFIDENCE")
+    agent_min_confidence: int = Field(65, env="AGENT_MIN_CONFIDENCE")
     agent_max_open_positions: int = Field(3, env="AGENT_MAX_OPEN_POSITIONS")
     agent_balance_reserve_pct: float = Field(0.30, env="AGENT_BALANCE_RESERVE_PCT")  # keep 30% back
     agent_ignore_balance_check: bool = Field(False, env="AGENT_IGNORE_BALANCE_CHECK")

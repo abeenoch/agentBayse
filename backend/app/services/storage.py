@@ -43,9 +43,8 @@ async def list_signals(
         base_query = base_query.where(SignalModel.event_id == event_id)
 
     if actionable_only:
-        # Active signals only: live bets (EXECUTED) and ones awaiting manual approval (PENDING)
-        # Exclude resolved (WON/LOST/SOLD/STALE) and anything older than 24h
-        cutoff = datetime.utcnow() - timedelta(hours=24)
+        # Active signals: only show recent ones (last 3 hours) that are still live
+        cutoff = datetime.utcnow() - timedelta(hours=3)
         base_query = base_query.where(
             SignalModel.signal_type.in_(["BUY_YES", "BUY_NO"]),
             SignalModel.status.in_(["PENDING", "EXECUTED"]),
@@ -61,7 +60,7 @@ async def list_signals(
     total = total_result.scalar_one()
 
     query = base_query.order_by(
-        SignalModel.rank_score.desc().nullslast(), SignalModel.created_at.desc()
+        SignalModel.created_at.desc()
     ).limit(limit).offset((page - 1) * limit)
     result = await session.execute(query)
     return list(result.scalars().all()), total

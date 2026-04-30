@@ -89,8 +89,8 @@ SYSTEM_PROMPT = (
     "  3. Read recent win/loss record. If on a losing streak, be more conservative.\n"
     "  4. Argue the NO case first — why might the NO outcome win? Then argue YES.\n"
     "  5. Only after arguing both sides, assign estimated_probability.\n"
-    "  6. BUY_YES: only when estimated_probability > yes_price AND EV > 0 AND confidence >= 60.\n"
-    "  7. BUY_NO: only when estimated_probability < no_price AND EV > 0 AND confidence >= 60.\n"
+    "  6. BUY_YES: only when estimated_probability > yes_price AND EV >= 6 AND confidence >= 65.\n"
+    "  7. BUY_NO: only when estimated_probability < no_price AND EV >= 6 AND confidence >= 65.\n"
     "  8. HOLD or AVOID: when edge is unclear, confidence < 60, or portfolio is already stretched.\n"
     "\n"
     "CRITICAL rules:\n"
@@ -391,6 +391,15 @@ class AIAgent:
         raw = search_resp.get("results", [])
         fallback_sources = [r.get("url", "") for r in raw if r.get("url")][:5]
         fallback_snippets = [r.get("snippet") or r.get("title") or "" for r in raw][:5]
+
+        # Skip 50/50 markets with no useful news — pure coin flip, no edge
+        is_fifty_fifty = abs(yes_price - no_price) < 0.02
+        has_useful_news = any(len(s) > 50 for s in fallback_snippets)
+        if is_fifty_fifty and not has_useful_news:
+            logger.info(
+                "Skipping %s — 50/50 market with no useful news context", market_id
+            )
+            return None
 
         # Ingest into RAG (non-blocking — fire and forget)
         from app.services import rag as rag_service
