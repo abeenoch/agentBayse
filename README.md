@@ -1,25 +1,166 @@
 # Bayse AI Trading Agent
 
-FastAPI backend + React/Vite frontend for browsing Bayse Markets, generating AI-backed signals, and optionally auto-executing trades.
+An autonomous prediction-market trading agent for [Bayse Markets](https://bayse.markets). The agent analyses open markets, fetches live news, reasons about probability using an LLM, and places bets automatically — with configurable risk controls.
 
-## What is in this repo
+---
 
-- `backend/` contains the FastAPI app, scheduler, Bayse client, risk checks, and persistence layer.
-- `frontend/` contains the React dashboard for markets, signals, portfolio, and agent settings.
-- The backend starts an APScheduler job on startup so the agent can scan markets automatically.
+## Architecture
 
-## Local Setup
+```
+bayseAgent/
+├── backend/          # FastAPI + APScheduler + SQLAlchemy
+│   ├── app/
+│   │   ├── main.py               # App factory, router registration, startup
+│   │   ├── config.py             # All settings via pydantic-settings (.env)
+│   │   ├── database.py           # Async SQLAlchemy engine, session, init_db
+│   │   ├── dependencies.py       # JWT auth dependency (OAuth2)
+│   │   ├── websocket_manager.py  # Broadcast hub for live frontend updates
+│   │   ├── models/               # SQLAlchemy ORM models
+│   │   │   ├── agent_config.py   # Configurable agent parameters (DB-stored)
+│   │   │   ├── analysis_state.py # Per-market cooldown tracking
+│   │   │   ├── event_market.py   # Event↔market relationship + status
+│   │   │   ├── signal.py         # Generated trading signals
+│   │   │   └── trade.py          # Executed orders
+│   │   ├── routers/
+│   │   │   ├── agent.py          # /agent/* — signals, config, approve, clear
+│   │   │   ├── auth.py           # /auth/token, /auth/me
+│   │   │   ├── markets.py        # /markets — proxies Bayse events list
+│   │   │   ├── portfolio.py      # /portfolio, /portfolio/positions, /portfolio/assets
+│   │   │   ├── trades.py         # /trades
+│   │   │   ├── search.py         # /search
+│   │   │   ├── websocket.py      # /ws/live — WebSocket endpoint
+│   │   │   └── webhook.py        # /webhook — inbound Bayse webhooks
+│   │   ├── services/
+│   │   │   ├── ai_agent.py       # Core agent: analysis, prompt building, signal generation
+│   │   │   ├── bayse_client.py   # Bayse REST API client (HMAC-signed)
+│   │   │   ├── llm_client.py     # LLM abstraction (Groq/Gemini/OpenAI/Anthropic)
+│   │   │   ├── rag.py            # ChromaDB RAG: ingest news, query context
+│   │   │   ├── risk_guard.py     # Pre-trade risk checks (EV, confidence, balance)
+│   │   │   ├── scheduler.py      # APScheduler jobs: agent cycle, order monitor
+│   │   │   ├── sniper.py         # Short-interval market watcher + stop-loss
+│   │   │   ├── storage.py        # Signal CRUD
+│   │   │   ├── trade_executor.py # Place orders on Bayse, create Trade records
+│   │   │   ├── web_search.py     # Tavily search wrapper
+│   │   │   ├── analysis.py       # EV, Kelly, Sharpe, drawdown calculations
+│   │   │   └── config_service.py # AgentConfig DB read/write
+│   │   └── utils/
+│   │       ├── auth.py           # JWT create/verify
+│   │       ├── logger.py         # Structured logger
+│   │       └── migrations.py     # Idempotent startup DDL migrations
+│   ├── tests/
+│   ├── requirements.txt
+│   └── .env                      # Local secrets (never commit)
+└── frontend/         # React + Vite + TailwindCSS
+    └── src/
+        ├── App.tsx               # Router setup
+        ├── pages/
+        │   ├── Dashboard.tsx     # Live overview: wallet, positions, activity
+        │   ├── Markets.tsx       # Open markets browser
+        │   ├── Signals.tsx       # Generated signals with approve/clear
+        │   └── Settings.tsx      # Agent config editor
+        ├── hooks/                # React Query data hooks
+        └── lib/
+            ├── api.ts            # Axios instance with JWT interceptor
+            └── auth.ts           # Token storage helpers
+```
+
+---
+
+## How the Agent Works
+
+### 1. Market Discovery (every 15 min)
+`scheduler.run_agent_cycle()` calls `populate_queue()` which fetches open events from a list of Bayse series slugs (crypto 5min/15min/1h, FX 1h, commodities). Each market is queued for analysis.
+
+### 2. Cooldown Check
+Before analysing a market, the agent checks:
+- In-memory: was this market analysed in the last `AGENT_REANALYZE_MINUTES`?
+- DB: same check via `AnalysisState` table
+
+### 3. Context Gathering
+For each market the agent collects:
+- YES/NO prices from the event data
+- Closing time → time remaining → timeframe classification (short/medium/long)
+- Live web search via Tavily (time-aware query: "price now today intraday" for <2h markets)
+- RAG retrieval: top-5 relevant chunks from ChromaDB (built from previous searches)
+- Prior signal history for this market (last 5 signals with outcomes)
+- Portfolio state: wallet balance, deployed capital, open positions, today's bet count, recent W/L record
+
+### 4. LLM Decision
+Everything is packed into a structured prompt and sent to the configured LLM. The system prompt instructs the model to:
+1. Read portfolio state first
+2. Consider the timeframe (ignore year-end forecasts for 1h markets)
+3. Argue the NO case before the YES case
+4. Only bet when EV > fee threshold AND confidence ≥ 65
+
+The LLM returns a JSON signal with: `signal`, `confidence`, `estimated_probability`, `expected_value`, `reasoning`, `suggested_stake`, `risk_level`.
+
+### 5. Post-LLM Normalization
+The agent recalculates:
+- Probability direction (flips for BUY_NO)
+- EV using live prices: `(prob × (100 - price) - (1 - prob) × price) × stake / 100`
+- Stake via fractional Kelly: `deployable_capital / max_open_positions` (1.5× for confidence ≥ 80)
+
+### 6. Risk Guard
+Two checks before saving:
+
+**`risk_guard()`** (synchronous):
+- Stake ≤ `AGENT_MAX_POSITION_SIZE`
+- Balance reserve: stake must not exceed `balance × (1 - reserve_pct) - deployed`
+- EV ≥ `(₦5 fee / stake) × 100` (scales with stake size)
+- Confidence ≥ `min_confidence`
+
+**`check_trade_limits()`** (async, uses live Bayse portfolio):
+- `len(outcomeBalances) < max_open_positions`
+
+### 7. Auto-Trade
+If `auto_trade=true` and signal passes all checks, `execute_signal()` places a MARKET order on Bayse and creates a `Trade` record.
+
+### 8. Sniper (every 30 sec)
+Watches markets closing within `SNIPE_OBSERVE_SECONDS` (default 5 min). Uses a faster prompt with live ticker data. Adds `entry_timing` (ENTER_NOW / WAIT / SKIP). Prevents duplicate execution via `_executed_markets` set.
+
+### 9. Stop-Loss (every 15 sec)
+Reads `outcomeBalances` from Bayse portfolio for accurate current values. If `(cost - current_value) / cost ≥ STOP_LOSS_PCT`, places a SELL order.
+
+### 10. Order Monitor (every 5 min)
+Polls `GET /pm/orders/{id}` and `GET /pm/activities?type=payout` to resolve WIN/LOSS and update P&L.
+
+---
+
+## Prerequisites
+
+- Python 3.11+
+- Node.js 18+
+- PostgreSQL 14+
+- API keys: Bayse, Groq (or Gemini/OpenAI/Anthropic), Tavily
+
+---
+
+## Setup
 
 ### Backend
 
 ```bash
 cd backend
-python -m venv .venv
-.venv\Scripts\activate
+python -m venv venv
+venv\Scripts\activate          # Windows
+# source venv/bin/activate     # macOS/Linux
+
 pip install -r requirements.txt
-copy .env.example .env
-uvicorn app.main:app --reload --port 8000
+
+cp .env.example .env           # fill in your keys
 ```
+
+Create the database:
+```sql
+CREATE DATABASE agent_bayse;
+```
+
+Start the server:
+```bash
+uvicorn app.main:app --reload
+```
+
+The server runs on `http://localhost:8000`. On first startup it creates all tables and runs idempotent migrations automatically.
 
 ### Frontend
 
@@ -29,192 +170,133 @@ npm install
 npm run dev
 ```
 
-The frontend defaults to `http://localhost:5173` and calls the backend at `http://localhost:8000` unless `VITE_API_URL` is set.
+The frontend runs on `http://localhost:5173`.
 
-## Configuration
+---
 
-The backend reads settings from `backend/.env` through `pydantic-settings`.
+## Environment Variables
 
-### Core
+All settings live in `backend/.env`. Copy `.env.example` and fill in:
 
-- `APP_SECRET_KEY`
-- `ADMIN_USERNAME`
-- `ADMIN_PASSWORD`
-- `JWT_ISSUER` - defaults to `bayse-agent`
-- `JWT_AUDIENCE` - defaults to `bayse-agent-web`
-- `DATABASE_URL` - defaults to PostgreSQL at `postgresql+asyncpg://postgres:postgres@localhost:5432/agent_bayse`
-- `FRONTEND_ORIGIN` - defaults to `http://localhost:5173`
-- `WEBHOOK_SECRET`
-- `MOCK_MODE` - defaults to `true`
+| Variable | Description | Default |
+|---|---|---|
+| `APP_SECRET_KEY` | JWT signing secret | required |
+| `ADMIN_USERNAME` | Dashboard login username | required |
+| `ADMIN_PASSWORD` | Dashboard login password | required |
+| `DATABASE_URL` | PostgreSQL async URL | required |
+| `BAYSE_PUBLIC_KEY` | Bayse API public key | required |
+| `BAYSE_PRIVATE_KEY` | Bayse API private key (HMAC signing) | required |
+| `BAYSE_DEFAULT_CURRENCY` | Trading currency | `NGN` |
+| `AI_PROVIDER` | `groq` / `gemini` / `openai` / `anthropic` | `groq` |
+| `GROQ_API_KEY` | Groq API key | — |
+| `GROQ_MODEL` | Groq model name | `llama-3.3-70b-versatile` |
+| `GEMINI_API_KEY` | Google Gemini API key | — |
+| `TAVILY_API_KEY` | Tavily search API key | — |
+| `SEARCH_INCLUDE_DOMAINS` | Comma-separated preferred domains | finance.yahoo.com,reuters.com,... |
+| `SEARCH_EXCLUDE_DOMAINS` | Comma-separated blocked domains | coincodex.com,... |
+| `AGENT_AUTO_TRADE` | Enable autonomous order placement | `false` |
+| `AGENT_MAX_OPEN_POSITIONS` | Max simultaneous open bets | `3` |
+| `AGENT_MIN_CONFIDENCE` | Minimum LLM confidence to trade (0–100) | `65` |
+| `AGENT_BALANCE_RESERVE_PCT` | Fraction of wallet kept untouched | `0.30` |
+| `AGENT_MAX_POSITION_SIZE` | Max stake per bet (₦) | `5000` |
+| `AGENT_SCAN_INTERVAL_SECONDS` | Agent cycle frequency | `900` |
+| `AGENT_REANALYZE_MINUTES` | Cooldown before re-analysing a market | `50` |
+| `AGENT_SERIES_SLUGS` | Comma-separated series to scan (empty = all) | — |
+| `SNIPE_SERIES_SLUGS` | Series for the sniper | `crypto-btc-5min,...` |
+| `SNIPE_OBSERVE_SECONDS` | How far out sniper starts watching | `300` |
+| `STOP_LOSS_PCT` | Loss fraction to trigger sell | `0.35` |
+| `MOCK_MODE` | Use mock responses (no real API calls) | `true` |
+| `FRONTEND_ORIGIN` | CORS allowed origin | `http://localhost:5173` |
 
-### Bayse
+---
 
-- `BAYSE_API_BASE_URL` - defaults to `https://relay.bayse.markets/v1`
-- `BAYSE_PUBLIC_KEY`
-- `BAYSE_PRIVATE_KEY`
-- `BAYSE_DEFAULT_CURRENCY` - defaults to `NGN`
+## API Reference
 
-### AI provider
+All endpoints are documented at `http://localhost:8000/docs` (Swagger UI).
 
-- `AI_PROVIDER` - `mock`, `gemini`, `groq`, `openai`, or `anthropic`
-- `GEMINI_API_KEY`
-- `GEMINI_MODEL` - defaults to `gemini-2.5-flash`
-- `GROQ_API_KEY`
-- `GROQ_MODEL` - defaults to `llama-3.3-70b-versatile`
-- `OPENAI_API_KEY`
-- `ANTHROPIC_API_KEY`
+Key endpoints:
 
-### Search
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/auth/token` | Get JWT token (form: username/password) |
+| `GET` | `/markets` | List open Bayse events |
+| `GET` | `/portfolio` | Portfolio summary from Bayse |
+| `GET` | `/portfolio/positions` | Live open positions (outcomeBalances) |
+| `GET` | `/portfolio/assets` | Wallet balances per currency |
+| `GET` | `/portfolio/activities` | Recent activity feed |
+| `GET` | `/agent/signals` | Recent signals (active last 3h by default) |
+| `POST` | `/agent/approve` | Manually execute a PENDING signal |
+| `GET` | `/agent/config` | Read agent config |
+| `POST` | `/agent/config` | Update agent config |
+| `POST` | `/agent/signals/clear` | Delete all signals |
+| `POST` | `/agent/trades/clear-stale` | Mark ghost DB trades as STALE |
+| `GET` | `/health` | Health check |
+| `WS` | `/ws/live` | WebSocket for real-time signal/trade events |
 
-- `SEARCH_PROVIDER` - defaults to `tavily`
-- `TAVILY_API_KEY`
-- `SERPAPI_KEY`
-- `SEARCH_DEPTH` - defaults to `advanced`
-- `SEARCH_MAX_RESULTS` - defaults to `8`
-- `SEARCH_TIME_RANGE`
-- `SEARCH_INCLUDE_DOMAINS`
-- `SEARCH_EXCLUDE_DOMAINS`
+---
 
-### Agent controls
+## Database Schema
 
-- `AGENT_AUTO_TRADE` - defaults to `false`
-- `AGENT_MAX_POSITION_SIZE` - defaults to `5000`
-- `AGENT_SCAN_INTERVAL_SECONDS` - defaults to `900`
-- `AGENT_MAX_DAILY_TRADES` - defaults to `20`
-- `AGENT_MIN_CONFIDENCE` - defaults to `20`
-- `AGENT_MAX_OPEN_POSITIONS` - defaults to `3`
-- `AGENT_BALANCE_RESERVE_PCT` - defaults to `0.30`
-- `AGENT_IGNORE_BALANCE_CHECK` - defaults to `false`
-- `AGENT_EVENT_PAGE_SIZE` - defaults to `50`
-- `AGENT_EVENT_PAGES` - defaults to `4`
-- `AGENT_REANALYZE_MINUTES` - defaults to `25`
-- `AGENT_SERIES_SLUGS`
+| Table | Purpose |
+|---|---|
+| `signals` | Every generated signal (BUY_YES/BUY_NO/HOLD/AVOID) with EV, confidence, reasoning, resolution |
+| `trades` | Every placed order with Bayse order ID, status, P&L |
+| `agent_config` | Single-row config: auto_trade, max_open_positions, min_confidence, balance_reserve_pct |
+| `analysis_state` | Per-market last-analysed timestamp (cooldown) |
+| `event_market` | Event↔market pairs with PENDING/COMPLETED status |
+| `market_snapshot` | (reserved) |
+| `portfolio_snapshot` | (reserved) |
 
-### Sniper and stop-loss
+Migrations run automatically at startup via `utils/migrations.py` — no Alembic needed.
 
-- `SNIPE_OBSERVE_SECONDS` - defaults to `300`
-- `SNIPE_MIN_SECONDS` - defaults to `8`
-- `SNIPE_SERIES_SLUGS`
-- `STOP_LOSS_PCT` - defaults to `0.35`
+---
 
-## Backend API
+## LLM Providers
 
-Base URL: `http://localhost:8000`
+Switch provider via `AI_PROVIDER` in `.env`:
 
-### Health
+| Provider | Key variable | Notes |
+|---|---|---|
+| `groq` | `GROQ_API_KEY` | Recommended. Fast, free tier available. Use `llama-3.3-70b-versatile`. |
+| `gemini` | `GEMINI_API_KEY` | Google Gemini 2.5 Flash. |
+| `openai` | `OPENAI_API_KEY` | Uses `gpt-4o-mini`. |
+| `anthropic` | `ANTHROPIC_API_KEY` | Uses `claude-3-5-haiku-latest`. |
+| `mock` | — | Set `MOCK_MODE=true`. Returns hardcoded BUY_YES signal. |
 
-- `GET /health` - returns a simple status payload.
+---
 
-### Auth
+## RAG Knowledge Base
 
-- `POST /auth/token` - OAuth2 password login using `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
-- `GET /auth/me` - returns the current username when a bearer token is present.
-- Protected routes require `Authorization: Bearer <token>` after login.
+The agent uses ChromaDB (in-process, persisted to `./chroma_db/`) as a vector store. On each analysis:
 
-### Markets
+1. Tavily searches for `"{market title} price now today intraday"` (for short markets)
+2. Results are scraped and chunked (400 words, 80-word overlap)
+3. Forecast/prediction sites are filtered out before ingestion
+4. Top-5 relevant chunks are retrieved and injected into the LLM prompt
 
-- `GET /markets` - lists events. Query params: `category`, `status`, `keyword`, `page`, `size`.
-- `GET /markets/trending`
-- `GET /markets/series`
-- `GET /markets/orderbook` - query uses repeated `outcomeId[]` values and optional `depth`.
-- `GET /markets/slug/{slug}`
-- `GET /markets/{event_id}`
-- `GET /markets/{event_id}/price-history` - params: `timePeriod`, `outcome`, repeated `marketId[]`
-- `GET /markets/{market_id}/ticker` - params: `outcome` or `outcomeId`
-- `GET /markets/{market_id}/trades` - params: `limit`
+The collection grows over time. To reset it, delete the `chroma_db/` directory.
 
-Note: when `category` is omitted, the backend defaults the markets list to `finance`.
+---
 
-### Trades
+## Risk Management
 
-- `POST /trades` - places a Bayse order. Query/body fields used by the handler: `event_id`, `market_id`, `side`, `outcome`, `amount`, `currency`.
-- `GET /trades` - lists orders. Query params: `status`, `page`, `size`.
-- `DELETE /trades/{order_id}` - cancels an order.
+The agent enforces multiple layers before placing any bet:
 
-### Portfolio
+1. **EV floor** — EV must exceed `(₦5 Bayse fee / stake) × 100`. Scales with stake size.
+2. **Confidence threshold** — Default 65%. Configurable in Settings.
+3. **Balance reserve** — 30% of wallet is always kept untouched. Configurable.
+4. **Position cap** — Max 3 simultaneous open bets (uses live Bayse `outcomeBalances`).
+5. **Stop-loss** — Sells if position loses ≥ 35% of cost (uses live portfolio values).
+6. **50/50 skip** — Markets at exactly 50/50 with no useful news are skipped entirely.
 
-- `GET /portfolio` - full portfolio payload from Bayse.
-- `GET /portfolio/orders` - convenience alias for orders.
-- `GET /portfolio/activities` - params: `type`, `page`, `size`.
-- `GET /portfolio/positions` - normalized open positions derived from portfolio outcome balances.
-- `GET /portfolio/assets` - wallet balances and assets.
+---
 
-### Agent
-
-- `POST /agent/analyze` - params: `event_id`, optional `market_id`; runs one-off analysis.
-- `GET /agent/signals` - params: `limit`, `page`, `event_id`, `all`.
-- `POST /agent/approve` - params: `signal_id`, optional `amount`; executes a stored signal.
-- `POST /agent/trades/clear-stale` - marks stale executed trades that have no resolution.
-- `GET /agent/status`
-- `GET /agent/config`
-- `POST /agent/config`
-
-### Search
-
-- `GET /search?q=...` - uses Tavily when configured; otherwise returns placeholder results.
-
-### WebSocket
-
-- `ws://localhost:8000/ws/live` - returns `{"type":"heartbeat"}` when pinged and broadcasts events such as `new_signal`, `order_resolved`, `snipe_executed`, and `stop_loss_triggered`.
-
-### Webhook
-
-- `POST /webhook/order` - Bayse order resolution webhook used to update trade and signal state.
-- Requires `X-Webhook-Secret` to match `WEBHOOK_SECRET`.
-
-## How the agent works
-
-- On startup, the app creates the database schema and starts the scheduler.
-- The regular agent cycle runs every `AGENT_SCAN_INTERVAL_SECONDS`.
-- It loads configured series slugs, applies the category filter from `/agent/config`, and queues market analyses.
-- Before analyzing each market, it enforces the open-position cap and balance checks.
-- Each analysis combines live Bayse data, web search results, RAG context, portfolio state, and an LLM decision.
-- Actionable `BUY_YES` and `BUY_NO` signals are stored and broadcast over WebSocket.
-- If `auto_trade` is enabled in agent config, saved actionable signals can be executed automatically after passing the risk checks.
-- A separate sniper loop watches short-interval markets every 30 seconds.
-- A stop-loss monitor checks open positions every 15 seconds and exits when the configured loss threshold is hit.
-
-## Frontend
-
-The UI has four routes:
-
-- `Dashboard` - portfolio summary, active positions, recent markets, activity feed, and signal details.
-- `Markets` - browse events, filter by category, inspect ticker, order book, recent trades, and price history.
-- `Signals` - review stored signals, inspect rationale and sources, and approve trades manually.
-- `Settings` - adjust autonomous trading config such as categories, max open positions, balance floor, and minimum confidence.
-
-The frontend uses `VITE_API_URL` when set, otherwise it talks to `http://localhost:8000`.
-
-## Testing
-
-Backend:
+## Running Tests
 
 ```bash
 cd backend
-pytest
+pytest tests/ -v
 ```
 
-Frontend:
+---
 
-```bash
-cd frontend
-npm run build
-```
-
-## Notes
-
-- `MOCK_MODE=true` keeps the Bayse client and LLM flow offline-friendly for local development.
-- In non-mock deployments, set `WEBHOOK_SECRET` so the order webhook is accepted.
-- The UI now shows a login screen and stores the bearer token locally after `POST /auth/token`.
-- The `Signals` page still calls `POST /agent/signals/clear`, but the backend currently exposes `POST /agent/trades/clear-stale` instead. If you want a clear-signals action, that endpoint needs to be added or the UI needs to be updated.
-- The backend markets endpoint only defaults to `finance` when no category is supplied. The frontend can still request other categories explicitly.
-- Security review documents:
-  - [Audit report](docs/security-audit-report.md)
-  - [Remediation plan](docs/remediation-plan.md)
-
-## Troubleshooting
-
-- If login fails, check `APP_SECRET_KEY`, `ADMIN_USERNAME`, and `ADMIN_PASSWORD`.
-- If the app returns mostly empty data, confirm `MOCK_MODE` is set the way you expect and the Bayse credentials are valid.
-- If the agent does not generate signals, verify `MOCK_MODE`, `AGENT_MIN_CONFIDENCE`, and the open-position caps in `/agent/config`.
-- If the frontend does not connect, confirm `FRONTEND_ORIGIN` on the backend and `VITE_API_URL` on the frontend.
