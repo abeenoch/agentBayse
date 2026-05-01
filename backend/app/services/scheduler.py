@@ -10,9 +10,13 @@ from app.services.ai_agent import get_agent
 from app.services.bayse_client import get_bayse_client
 from app.database import AsyncSessionLocal
 from app.services.config_service import get_config
+from app.services.payout_reconciliation import (
+    apply_activity_to_trade,
+    index_payout_activities,
+    match_payout_activity_for_trade,
+)
 from app.utils.logger import logger
 from app.models.trade import Trade
-from app.models.signal import Signal
 from app.models.event_market import EventMarket
 from sqlalchemy import select
 
@@ -250,18 +254,17 @@ async def monitor_orders():
 
             # Fetch recent payout activities to match against our trades
             payout_by_order: Dict[str, dict] = {}
+            payout_by_event_market: Dict[tuple[str, str], dict] = {}
             try:
                 acts = await client.get_activities(type="payout", size=50)
-                for act in (acts or {}).get("activities", []):
-                    oid = act.get("orderId")
-                    if oid:
-                        payout_by_order[oid] = act
+                payout_by_order, payout_by_event_market = index_payout_activities((acts or {}).get("activities", []))
             except Exception as exc:
                 logger.warning("monitor_orders: failed to fetch activities: %s", exc)
 
             for t in trades:
                 if not t.bayse_order_id:
-                    continue
+                    # Fallback matching can still resolve legacy rows via eventId/marketId.
+                    pass
                 if t.bayse_order_id in {"CLOB", "AMM"}:
                     logger.warning("Marking legacy order id %s for trade %s as STALE", t.bayse_order_id, t.id)
                     t.status = "STALE"
@@ -271,42 +274,31 @@ async def monitor_orders():
                 try:
                     uuid.UUID(str(t.bayse_order_id))
                 except Exception:
-                    logger.warning("Marking non-UUID order id %s for trade %s as STALE", t.bayse_order_id, t.id)
-                    t.status = "STALE"
-                    t.resolution = "EXPIRED"
-                    session.add(t)
-                    continue
+                    if t.bayse_order_id:
+                        logger.warning("Marking non-UUID order id %s for trade %s as STALE", t.bayse_order_id, t.id)
+                        t.status = "STALE"
+                        t.resolution = "EXPIRED"
+                        session.add(t)
+                        continue
                 try:
-                    data = await client.get_order(t.bayse_order_id)
-                    status = data.get("status", "")
+                    if t.bayse_order_id:
+                        data = await client.get_order(t.bayse_order_id)
+                        status = data.get("status", "")
 
-                    if status in ("filled", "FILLED"):
-                        t.status = "EXECUTED"
-                    elif status in ("cancelled", "CANCELLED", "expired", "EXPIRED", "rejected", "REJECTED"):
-                        t.status = status.upper()
+                        if status in ("filled", "FILLED"):
+                            t.status = "EXECUTED"
+                        elif status in ("cancelled", "CANCELLED", "expired", "EXPIRED", "rejected", "REJECTED"):
+                            t.status = status.upper()
 
-                    # Check payout activities for resolution
-                    act = payout_by_order.get(t.bayse_order_id)
+                    act, _sig = await match_payout_activity_for_trade(
+                        session,
+                        t,
+                        payout_by_order,
+                        payout_by_event_market,
+                    )
                     if act:
-                        act_type = act.get("type", "")
-                        payout = float(act.get("payout") or 0)
-                        resolved_outcome = act.get("resolvedOutcome")
-                        if act_type == "PAYOUT_WIN":
-                            t.resolution = "WIN"
-                            t.pnl = payout - (t.total_cost or 0)
-                        elif act_type == "PAYOUT_LOSS":
-                            t.resolution = "LOSS"
-                            t.pnl = -(t.total_cost or 0)
-
-                        if t.signal_id:
-                            sig = await session.get(Signal, t.signal_id)
-                            if sig:
-                                sig.resolution = t.resolution
-                                sig.status = "WON" if t.resolution == "WIN" else "LOST"
-                                sig.pnl = t.pnl
-                                session.add(sig)
-
-                    session.add(t)
+                        await apply_activity_to_trade(session, t, act)
+                        session.add(t)
                 except Exception as order_err:
                     logger.warning("Failed to refresh order %s: %s", t.bayse_order_id, order_err)
             await session.commit()

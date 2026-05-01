@@ -1,16 +1,4 @@
-"""
-RAG (Retrieval-Augmented Generation) service.
 
-On each agent cycle:
-  1. For every market topic, run multiple search queries via Tavily.
-  2. Scrape the full text of each result URL.
-  3. Chunk the text and upsert into a ChromaDB collection.
-
-During analysis:
-  - query(topic) returns the top-k most relevant chunks for the LLM prompt.
-
-ChromaDB runs fully in-process (no server), persisted to ./chroma_db/.
-"""
 from __future__ import annotations
 
 import asyncio

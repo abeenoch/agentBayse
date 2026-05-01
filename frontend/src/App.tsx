@@ -29,8 +29,8 @@ function App() {
       <div className="mx-auto max-w-6xl px-4 py-6">
         <header className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-primary/30 flex items-center justify-center text-lg font-bold text-primary">
-              PB
+            <div className="w-10 h-10 rounded-full bg-primary/30 flex items-center justify-center text-xl">
+              🕵️
             </div>
             <div>
               <h1 className="text-xl font-semibold">
