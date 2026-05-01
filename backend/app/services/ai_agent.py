@@ -464,7 +464,7 @@ class AIAgent:
             # Recent win/loss record (last 10 resolved)
             rec_q = await session.execute(
                 sa_select(SignalModel.resolution)
-                .where(SignalModel.resolution.isnot(None))
+                .where(SignalModel.resolution.in_(["WIN", "LOSS"]))
                 .order_by(SignalModel.created_at.desc())
                 .limit(10)
             )

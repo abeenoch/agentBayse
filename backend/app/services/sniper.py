@@ -34,6 +34,7 @@ from app.database import AsyncSessionLocal
 from app.models.signal import Signal
 from app.models.trade import Trade
 from app.services.bayse_client import get_bayse_client
+from app.services.outcome_sync import sync_signal_outcome
 from app.services.trade_executor import execute_signal
 from app.utils.logger import logger
 from app.websocket_manager import manager
@@ -328,7 +329,16 @@ async def stop_loss_scan():
                     )
                     trade.status = "SOLD"
                     trade.resolution = "STOP_LOSS"
+                    trade.pnl = current_value - (trade.total_cost or 0)
                     session.add(trade)
+
+                    await sync_signal_outcome(
+                        session,
+                        trade,
+                        market_resolution="STOP_LOSS",
+                        payout=current_value,
+                    )
+
                     await session.commit()
 
                     await manager.broadcast({

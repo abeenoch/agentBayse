@@ -24,7 +24,6 @@ class BayseClient:
     """
     Thin async client for Bayse Markets REST API.
     Implements required headers and signing for write operations.
-    Docs: https://docs.bayse.markets/llms.txt (index)
     """
 
     def __init__(self):
@@ -224,7 +223,6 @@ class BayseClient:
     async def trades(self, market_id: str, limit: int = 50):
         return await self._request("GET", "/pm/trades", params={"marketId": market_id, "limit": limit})
 
-    # ----- Authenticated reads -----
     async def get_wallet_balance(self, currency: str | None = None) -> float:
         """
         Fetch the actual spendable wallet balance from GET /wallet/assets.
@@ -261,7 +259,6 @@ class BayseClient:
     async def get_assets(self):
         return await self._request("GET", "/wallet/assets")
 
-    # ----- Trading (signed) -----
     async def quote(self, event_id: str, market_id: str, outcome_id: str, side: str, amount: float, currency: str | None = None):
         """Get a price quote. outcome_id is the UUID from market.outcome1Id / outcome2Id."""
         body = {
@@ -324,7 +321,6 @@ class BayseClient:
     async def cancel_order(self, order_id: str):
         return await self._request("DELETE", f"/pm/orders/{order_id}", signed=True)
 
-    # ----- Utilities -----
     async def close(self):
         await self.client.aclose()
 

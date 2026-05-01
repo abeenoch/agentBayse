@@ -7,6 +7,7 @@ from app.config import settings
 from app.database import AsyncSessionLocal
 from app.models.signal import Signal
 from app.models.trade import Trade
+from app.services.outcome_sync import sync_signal_outcome
 from app.utils.logger import logger
 from app.websocket_manager import manager
 from sqlalchemy import select
@@ -76,10 +77,20 @@ async def order_webhook(request: Request, x_webhook_secret: str | None = Header(
                 sig = await session.get(Signal, trade.signal_id)
                 if sig:
                     if resolution:
-                        sig.resolution = resolution
-                        sig.status = "WON" if (payout or 0) > (trade.total_cost or 0) else "LOST"
-                    if payout is not None:
-                        sig.pnl = float(payout) - (trade.total_cost or 0)
+                        await sync_signal_outcome(
+                            session,
+                            trade,
+                            market_resolution=resolution,
+                            payout=float(payout) if payout is not None else None,
+                        )
+                    elif payout is not None:
+                        inferred = "WIN" if float(payout) > float(trade.total_cost or 0) else "LOSS"
+                        await sync_signal_outcome(
+                            session,
+                            trade,
+                            market_resolution=inferred,
+                            payout=float(payout),
+                        )
                     session.add(sig)
 
             session.add(trade)
