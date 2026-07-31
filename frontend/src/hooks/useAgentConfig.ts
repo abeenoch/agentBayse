@@ -9,6 +9,9 @@ export type AgentConfig = {
   max_open_positions: number;
   balance_floor: number;
   min_confidence: number;
+  balance_reserve_pct: number;
+  bayes_live_decision_mode: boolean;
+  bayes_state_key: string;
 };
 
 export function useAgentConfig() {

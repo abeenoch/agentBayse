@@ -3,7 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import init_db
-from app.services.scheduler import start_scheduler
+from app.database import AsyncSessionLocal
+from app.services.bayse_client import get_bayse_client
+from app.services.scheduler import normalize_terminal_trades, reconcile_open_trades, start_scheduler
 from app.routers import auth, markets, trades, portfolio, agent, search, websocket, webhook
 
 
@@ -27,9 +29,27 @@ def create_app() -> FastAPI:
     app.include_router(websocket.router, tags=["websocket"])
     app.include_router(webhook.router, prefix="/webhook", tags=["webhook"])
 
+    async def run_startup_reconciliation() -> None:
+        await init_db()
+        async with AsyncSessionLocal() as session:
+            normalized_count = await normalize_terminal_trades(session)
+            checked_count, resolved_count = await reconcile_open_trades(session, get_bayse_client())
+            from app.utils.logger import logger
+            logger.info(
+                "Startup reconciliation complete: normalized=%d checked=%d resolved=%d",
+                normalized_count,
+                checked_count,
+                resolved_count,
+            )
+
     @app.on_event("startup")
     async def startup_event():
-        await init_db()
+        try:
+            await run_startup_reconciliation()
+        except Exception as exc:
+            # Startup should continue even if Bayse is temporarily unreachable.
+            from app.utils.logger import logger
+            logger.warning("Startup reconciliation failed: %s", exc, exc_info=True)
         start_scheduler()
 
     @app.get("/health")

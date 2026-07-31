@@ -1,6 +1,7 @@
 import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import "./styles.css";
 import { Dashboard } from "./pages/Dashboard";
+import { Bayes } from "./pages/Bayes";
 import { Markets } from "./pages/Markets";
 import { Signals } from "./pages/Signals";
 import { Settings } from "./pages/Settings";
@@ -48,6 +49,9 @@ function App() {
             <NavLink to="/signals" className={navClasses}>
               Signals
             </NavLink>
+            <NavLink to="/bayes" className={navClasses}>
+              Bayes
+            </NavLink>
             <NavLink to="/settings" className={navClasses}>
               Settings
             </NavLink>
@@ -69,6 +73,7 @@ function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/markets" element={<Markets />} />
             <Route path="/signals" element={<Signals />} />
+            <Route path="/bayes" element={<Bayes />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>
         </main>

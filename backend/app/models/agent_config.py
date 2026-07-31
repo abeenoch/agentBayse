@@ -17,3 +17,5 @@ class AgentConfig(Base):
     balance_floor = Column(Float, default=0.0, nullable=False)
     min_confidence = Column(Integer, default=50, nullable=False)
     balance_reserve_pct = Column(Float, default=0.30, nullable=False)  # keep 30% of balance untouched
+    bayes_live_decision_mode = Column(Boolean, default=True, nullable=False)
+    bayes_state_key = Column(String, default="default", nullable=False)

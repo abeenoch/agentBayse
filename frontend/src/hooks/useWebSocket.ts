@@ -33,6 +33,28 @@ export function useWebSocket() {
           case "snipe_executed":
             qc.invalidateQueries({ queryKey: ["signals"] });
             break;
+          case "bayes_snapshot":
+            qc.invalidateQueries({ queryKey: ["bayes-snapshots"] });
+            qc.invalidateQueries({ queryKey: ["bayes-report"] });
+            break;
+          case "bayes_training_run":
+            qc.invalidateQueries({ queryKey: ["bayes-live-training"] });
+            qc.invalidateQueries({ queryKey: ["bayes-training-latest"] });
+            qc.invalidateQueries({ queryKey: ["bayes-audit"] });
+            qc.invalidateQueries({ queryKey: ["bayes-calibration"] });
+            qc.invalidateQueries({ queryKey: ["bayes-report"] });
+            break;
+          case "backtest_snapshot_updated":
+            qc.invalidateQueries({ queryKey: ["bayes-backtest"] });
+            break;
+          case "bayes_state":
+            qc.invalidateQueries({ queryKey: ["bayes-report"] });
+            break;
+          case "decision_mode_changed":
+            qc.invalidateQueries({ queryKey: ["agent-config"] });
+            qc.invalidateQueries({ queryKey: ["bayes-report"] });
+            qc.invalidateQueries({ queryKey: ["bayes-snapshots"] });
+            break;
           case "order_resolved":
           case "stop_loss_triggered":
             qc.invalidateQueries({ queryKey: ["signals"] });

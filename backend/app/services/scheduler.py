@@ -1,5 +1,5 @@
-from datetime import datetime
-from typing import List, Dict
+from datetime import datetime, timezone
+from typing import List, Dict, Any
 import re
 import uuid
 
@@ -16,6 +16,7 @@ from app.services.payout_reconciliation import (
     match_payout_activity_for_trade,
 )
 from app.utils.logger import logger
+from app.models.signal import Signal
 from app.models.trade import Trade
 from app.models.event_market import EventMarket
 from sqlalchemy import select
@@ -107,6 +108,200 @@ def _watchlist_reason(event: Dict, market: Dict) -> str | None:
 
 def _matches_watchlist(event: Dict, market: Dict) -> bool:
     return _watchlist_reason(event, market) is not None
+
+
+def _as_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _parse_activity_timestamp(activity: dict) -> datetime | None:
+    raw = activity.get("createdAt") or activity.get("updatedAt")
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        return _as_utc(parsed)
+    except Exception:
+        return None
+
+
+def _extract_activity_list(payload: dict | None) -> list[dict]:
+    """
+    Normalize the different response shapes Bayse may return.
+
+    The production API has changed shape before, and our client also uses a
+    `data_stale` sentinel when requests fail. Treat that sentinel as an error
+    source instead of silently reconciling against an empty list.
+    """
+    if not isinstance(payload, dict):
+        return []
+    if payload.get("data_stale"):
+        raise RuntimeError("Bayse activity feed unavailable")
+
+    if isinstance(payload.get("activities"), list):
+        return list(payload["activities"])
+
+    data = payload.get("data")
+    if isinstance(data, dict):
+        if isinstance(data.get("activities"), list):
+            return list(data["activities"])
+        if isinstance(data.get("items"), list):
+            return list(data["items"])
+
+    if isinstance(payload.get("items"), list):
+        return list(payload["items"])
+
+    return []
+
+
+def _format_age(reference: datetime | None, now: datetime | None = None) -> dict[str, Any]:
+    current = _as_utc(now or datetime.utcnow())
+    ref = _as_utc(reference)
+    if ref is None:
+        return {"seconds": None, "human": None}
+    delta = max((current - ref).total_seconds(), 0.0)
+    if delta < 60:
+        human = f"{int(delta)}s"
+    elif delta < 3600:
+        human = f"{delta / 60:.1f}m"
+    else:
+        human = f"{delta / 3600:.1f}h"
+    return {"seconds": round(delta, 2), "human": human}
+
+
+def _candidate_trade_filter(include_stale_expired: bool = False):
+    from sqlalchemy import or_, and_
+
+    live_statuses = {"EXECUTED", "SOLD"}
+    live_clause = and_(Trade.status.in_(live_statuses), Trade.resolution.is_(None))
+    if not include_stale_expired:
+        return live_clause
+    stale_clause = and_(Trade.status == "STALE", Trade.resolution == "EXPIRED")
+    expired_clause = and_(Trade.status.in_(live_statuses), Trade.resolution == "EXPIRED")
+    return or_(live_clause, stale_clause, expired_clause)
+
+
+async def _fetch_payout_activities_since(
+    client,
+    *,
+    cutoff: datetime | None,
+    page_size: int = 100,
+    max_pages: int = 10,
+) -> list[dict]:
+    """
+    Fetch payout activities newest-first until we reach activities older than cutoff.
+
+    This keeps reconciliation bounded while still catching up after long downtimes.
+    """
+    cutoff_utc = _as_utc(cutoff)
+    collected: list[dict] = []
+
+    for page in range(1, max_pages + 1):
+        payload = await client.get_activities(type="payout", page=page, size=page_size)
+        activities = _extract_activity_list(payload)
+        if not activities:
+            break
+
+        for activity in activities:
+            ts = _parse_activity_timestamp(activity)
+            if ts is not None and cutoff_utc is not None and ts < cutoff_utc:
+                continue
+            collected.append(activity)
+
+        # If the oldest item on this page is already older than our cutoff, the
+        # next page should only be older as well, so stop paging.
+        if cutoff_utc is not None:
+            page_times = [ts for ts in (_parse_activity_timestamp(a) for a in activities) if ts is not None]
+            if page_times and min(page_times) < cutoff_utc:
+                break
+
+    return collected
+
+
+async def collect_live_trade_diagnostics(
+    session,
+    client,
+    *,
+    include_stale_expired: bool = False,
+    page_size: int = 100,
+    max_pages: int = 10,
+) -> list[dict[str, Any]]:
+    """
+    Build a read-only view of unresolved live trades plus Bayse match status.
+    """
+    result = await session.execute(
+        select(Trade).where(_candidate_trade_filter(include_stale_expired=include_stale_expired))
+    )
+    trades = list(result.scalars().all())
+    if not trades:
+        return []
+
+    oldest_live_trade = min(
+        (_as_utc(t.created_at) for t in trades if t.created_at is not None),
+        default=None,
+    )
+    bayse_fetch_error = None
+    try:
+        activities = await _fetch_payout_activities_since(
+            client,
+            cutoff=oldest_live_trade,
+            page_size=page_size,
+            max_pages=max_pages,
+        )
+    except Exception as exc:
+        bayse_fetch_error = str(exc)
+        activities = []
+    payout_by_order, payout_by_event_market = index_payout_activities(activities)
+    now = datetime.utcnow()
+
+    diagnostics: list[dict[str, Any]] = []
+    for trade in trades:
+        signal = None
+        if trade.signal_id:
+            signal = await session.get(Signal, trade.signal_id)
+
+        activity = None
+        match_type = None
+        if trade.bayse_order_id:
+            activity = payout_by_order.get(str(trade.bayse_order_id))
+            if activity:
+                match_type = "order_id"
+
+        if activity is None and signal and signal.event_id:
+            activity = payout_by_event_market.get((str(signal.event_id), str(trade.market_id)))
+            if activity:
+                match_type = "event_market"
+
+        activity_ts = _parse_activity_timestamp(activity) if activity else None
+        diagnostics.append({
+            "trade_id": str(trade.id),
+            "signal_id": str(trade.signal_id) if trade.signal_id else None,
+            "market_id": trade.market_id,
+            "market_name": trade.market_name,
+            "status": trade.status,
+            "resolution": trade.resolution,
+            "pnl": trade.pnl,
+            "created_at": trade.created_at.isoformat() if trade.created_at else None,
+            "executed_at": trade.executed_at.isoformat() if trade.executed_at else None,
+            "resolved_at": trade.resolved_at.isoformat() if trade.resolved_at else None,
+            "age": _format_age(trade.executed_at or trade.created_at, now=now),
+            "bayse_order_id": trade.bayse_order_id,
+            "bayse_match": {
+                "matched": activity is not None,
+                "match_type": match_type,
+                "activity_type": activity.get("type") if activity else None,
+                "resolved_outcome": activity.get("resolvedOutcome") if activity else None,
+                "payout": activity.get("payout") if activity else None,
+                "activity_created_at": activity_ts.isoformat() if activity_ts else None,
+            },
+            "bayse_fetch_error": bayse_fetch_error,
+        })
+
+    return diagnostics
 
 
 async def populate_queue():
@@ -235,6 +430,103 @@ async def run_agent_cycle():
         logger.error("Agent cycle failed: %s", exc, exc_info=True)
 
 
+async def reconcile_open_trades(session, client) -> tuple[int, int]:
+    """
+    Reconcile unresolved trades against Bayse order and payout history.
+
+    This is used both by the periodic order monitor and once at startup so a
+    restarted server can catch up on outcomes that resolved while it was down.
+    """
+    result = await session.execute(
+        select(Trade).where(_candidate_trade_filter(include_stale_expired=True))
+    )
+    trades = list(result.scalars().all())
+    if not trades:
+        return 0, 0
+
+    oldest_live_trade = min(
+        (_as_utc(t.created_at) for t in trades if t.created_at is not None),
+        default=None,
+    )
+    payout_by_order: Dict[str, dict] = {}
+    payout_by_event_market: Dict[tuple[str, str], dict] = {}
+    try:
+        acts = await _fetch_payout_activities_since(client, cutoff=oldest_live_trade)
+        payout_by_order, payout_by_event_market = index_payout_activities(acts)
+    except Exception as exc:
+        logger.warning("reconcile_open_trades: failed to fetch payout activities: %s", exc)
+
+    resolved_count = 0
+    for t in trades:
+        if not t.bayse_order_id:
+            pass
+        if t.bayse_order_id in {"CLOB", "AMM"}:
+            logger.warning("Marking legacy order id %s for trade %s as STALE", t.bayse_order_id, t.id)
+            t.status = "STALE"
+            t.resolution = "EXPIRED"
+            session.add(t)
+            continue
+        try:
+            uuid.UUID(str(t.bayse_order_id))
+        except Exception:
+            if t.bayse_order_id:
+                logger.warning("Marking non-UUID order id %s for trade %s as STALE", t.bayse_order_id, t.id)
+                t.status = "STALE"
+                t.resolution = "EXPIRED"
+                session.add(t)
+                continue
+        try:
+            if t.bayse_order_id:
+                data = await client.get_order(t.bayse_order_id)
+                if isinstance(data, dict) and data.get("data_stale"):
+                    raise RuntimeError("Bayse order feed unavailable")
+                status = data.get("status", "")
+
+                if status in ("filled", "FILLED"):
+                    if t.status == "STALE":
+                        t.status = "EXECUTED"
+                elif status in ("cancelled", "CANCELLED", "expired", "EXPIRED", "rejected", "REJECTED"):
+                    if t.status == "STALE" and t.resolution == "EXPIRED":
+                        # Keep the stale marker if Bayse still reports a terminal expiry.
+                        session.add(t)
+                    else:
+                        t.status = status.upper()
+
+            act, _sig = await match_payout_activity_for_trade(
+                session,
+                t,
+                payout_by_order,
+                payout_by_event_market,
+            )
+            if act:
+                signal = await apply_activity_to_trade(session, t, act)
+                if signal is not None:
+                    resolved_count += 1
+                session.add(t)
+        except Exception as order_err:
+            logger.warning("Failed to refresh order %s: %s", t.bayse_order_id, order_err)
+
+    await session.commit()
+    return len(trades), resolved_count
+
+
+async def normalize_terminal_trades(session) -> int:
+    """
+    Normalize terminal-but-skipped trades into a reconciliable state.
+
+    We only touch rows that are already terminal on the local side but were left
+    in EXECUTED/EXPIRED by a partial sync. This keeps the repair narrow and safe.
+    """
+    from sqlalchemy import update
+
+    result = await session.execute(
+        update(Trade)
+        .where(Trade.status == "EXECUTED", Trade.resolution == "EXPIRED")
+        .values(status="STALE")
+    )
+    return int(result.rowcount or 0)
+
+
 async def monitor_orders():
     """
     Poll for order resolution and P&L.
@@ -245,63 +537,8 @@ async def monitor_orders():
     client = get_bayse_client()
     try:
         async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                select(Trade).where(Trade.status == "EXECUTED", Trade.resolution.is_(None))
-            )
-            trades = list(result.scalars().all())
-            if not trades:
-                return
-
-            # Fetch recent payout activities to match against our trades
-            payout_by_order: Dict[str, dict] = {}
-            payout_by_event_market: Dict[tuple[str, str], dict] = {}
-            try:
-                acts = await client.get_activities(type="payout", size=50)
-                payout_by_order, payout_by_event_market = index_payout_activities((acts or {}).get("activities", []))
-            except Exception as exc:
-                logger.warning("monitor_orders: failed to fetch activities: %s", exc)
-
-            for t in trades:
-                if not t.bayse_order_id:
-                    # Fallback matching can still resolve legacy rows via eventId/marketId.
-                    pass
-                if t.bayse_order_id in {"CLOB", "AMM"}:
-                    logger.warning("Marking legacy order id %s for trade %s as STALE", t.bayse_order_id, t.id)
-                    t.status = "STALE"
-                    t.resolution = "EXPIRED"
-                    session.add(t)
-                    continue
-                try:
-                    uuid.UUID(str(t.bayse_order_id))
-                except Exception:
-                    if t.bayse_order_id:
-                        logger.warning("Marking non-UUID order id %s for trade %s as STALE", t.bayse_order_id, t.id)
-                        t.status = "STALE"
-                        t.resolution = "EXPIRED"
-                        session.add(t)
-                        continue
-                try:
-                    if t.bayse_order_id:
-                        data = await client.get_order(t.bayse_order_id)
-                        status = data.get("status", "")
-
-                        if status in ("filled", "FILLED"):
-                            t.status = "EXECUTED"
-                        elif status in ("cancelled", "CANCELLED", "expired", "EXPIRED", "rejected", "REJECTED"):
-                            t.status = status.upper()
-
-                    act, _sig = await match_payout_activity_for_trade(
-                        session,
-                        t,
-                        payout_by_order,
-                        payout_by_event_market,
-                    )
-                    if act:
-                        await apply_activity_to_trade(session, t, act)
-                        session.add(t)
-                except Exception as order_err:
-                    logger.warning("Failed to refresh order %s: %s", t.bayse_order_id, order_err)
-            await session.commit()
+            await normalize_terminal_trades(session)
+            await reconcile_open_trades(session, client)
     except Exception as exc:
         logger.error("Order monitor failed: %s", exc, exc_info=True)
 

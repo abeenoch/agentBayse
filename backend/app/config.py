@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     agent_reanalyze_minutes: int = Field(25, env="AGENT_REANALYZE_MINUTES")
     # Comma-separated series slugs for the regular agent cycle (empty = all known series)
     agent_series_slugs: str = Field("", env="AGENT_SERIES_SLUGS")
+    bayes_live_decision_mode: bool = Field(True, env="BAYES_LIVE_DECISION_MODE")
+    bayes_state_key: str = Field("default", env="BAYES_STATE_KEY")
 
     database_url: str = Field(
         "postgresql+asyncpg://postgres:postgres@localhost:5432/agent_bayse",

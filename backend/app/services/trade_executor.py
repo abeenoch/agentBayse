@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.bayse_client import BayseClient
 from app.models.signal import Signal
 from app.models.trade import Trade
+from app.services.storage import link_feature_snapshot
 from app.utils.logger import logger
 
 
@@ -104,11 +105,19 @@ async def execute_signal(
         status="EXECUTED",
         source="AGENT",
         signal_id=signal.id,
+        bayes_state_key=getattr(signal, "bayes_state_key", None) or "default",
         bayse_order_id=order_id,
+        executed_at=datetime.utcnow(),
     )
     session.add(trade)
     await session.commit()
     await session.refresh(signal)
+    await link_feature_snapshot(
+        session,
+        market_id=signal.market_id,
+        signal_id=signal.id,
+        trade_id=trade.id,
+    )
 
     try:
         from app.services.scheduler import ensure_order_monitor_job

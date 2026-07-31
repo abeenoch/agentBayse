@@ -6,7 +6,8 @@ import { useWalletBalance } from "../hooks/useWalletBalance";
 import { Modal } from "../components/Modal";
 import { useState } from "react";
 import { useActivities } from "../hooks/useActivities";
-import { useQueryClient } from "@tanstack/react-query";
+import { useAgentConfig } from "../hooks/useAgentConfig";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 
 const STATUS_COLORS: Record<string, string> = {
@@ -32,9 +33,28 @@ export function Dashboard() {
   const { data: portfolio } = usePortfolio();
   const { data: positionsData, dataUpdatedAt: positionsUpdated } = usePositions();
   const { data: walletBalance } = useWalletBalance();
+  const { data: agentConfig } = useAgentConfig();
+  const { data: bayesReport } = useQuery({
+    queryKey: ["bayes-report"],
+    queryFn: async () => {
+      const { data } = await api.get("/agent/bayes/report");
+      return data;
+    },
+    refetchInterval: 15_000,
+  });
+  const { data: bayesSnapshots } = useQuery({
+    queryKey: ["bayes-snapshots"],
+    queryFn: async () => {
+      const { data } = await api.get("/agent/bayes/snapshots", { params: { limit: 5 } });
+      return data;
+    },
+    refetchInterval: 15_000,
+  });
   const markets = marketsResp?.events || [];
   const signals = signalsResp?.signals || [];
   const positions = positionsData?.positions || [];
+  const latestSignal = signals[0] || null;
+  const latestBayes = bayesSnapshots?.snapshots?.[0] || null;
   const [selectedSignal, setSelectedSignal] = useState<any | null>(null);
   const [selectedMarket, setSelectedMarket] = useState<any | null>(null);
   const [selectedActivity, setSelectedActivity] = useState<any | null>(null);
@@ -63,6 +83,99 @@ export function Dashboard() {
           Live
         </div>
       </header>
+
+      <div className="grid gap-4 md:grid-cols-3">
+        <div className="bg-surface border border-border rounded-xl p-4">
+          <p className="text-sm text-muted">Decision Mode</p>
+          <p className="text-2xl font-semibold">
+            {agentConfig?.bayes_live_decision_mode ? "Bayes Live" : "Shadow"}
+          </p>
+          <p className="text-xs text-muted">
+            {agentConfig?.bayes_state_key ? `State key: ${agentConfig.bayes_state_key}` : "State key unknown"}
+          </p>
+        </div>
+        <div className="bg-surface border border-border rounded-xl p-4">
+          <p className="text-sm text-muted">Bayes Posterior</p>
+          {bayesReport ? (
+            <>
+              <p className="text-2xl font-mono font-semibold">
+                YES {(bayesReport.avg_posterior_yes * 100).toFixed(1)}%
+              </p>
+              <p className="text-xs text-muted">
+                NO {(bayesReport.avg_posterior_no * 100).toFixed(1)}%
+              </p>
+            </>
+          ) : (
+            <p className="text-muted text-sm">Loading Bayes report...</p>
+          )}
+        </div>
+        <div className="bg-surface border border-border rounded-xl p-4">
+          <p className="text-sm text-muted">Model State</p>
+          {bayesReport?.bayes_state ? (
+            <>
+              <p className="text-2xl font-mono font-semibold">
+                {bayesReport.bayes_state.model_version}
+              </p>
+              <p className="text-xs text-muted">
+                Updates: {bayesReport.bayes_state.yes_updates} yes / {bayesReport.bayes_state.no_updates} no
+              </p>
+            </>
+          ) : (
+            <p className="text-muted text-sm">No Bayes state yet.</p>
+          )}
+        </div>
+      </div>
+
+      <section className="bg-surface border border-border rounded-xl p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="font-semibold">Bayes Engine</h2>
+            <p className="text-xs text-muted">Feature encoder &rarr; Bayesian network &rarr; trade decision</p>
+        </div>
+        <div className="grid gap-4 md:grid-cols-3">
+          <div className="rounded-lg border border-border p-3 bg-[#0F1016]">
+            <p className="text-xs text-muted">Latest snapshot</p>
+            {latestBayes ? (
+              <>
+                <p className="text-sm font-semibold truncate">{latestBayes.market_name}</p>
+                <p className="text-xs text-muted">Action: {latestBayes.posterior_action ?? "N/A"}</p>
+                <p className="text-xs text-muted">YES: {(Number(latestBayes.posterior_yes || 0) * 100).toFixed(1)}%</p>
+                <p className="text-xs text-muted">Confidence: {(Number(latestBayes.posterior_confidence || 0) * 100).toFixed(0)}%</p>
+              </>
+            ) : (
+              <p className="text-sm text-muted">No Bayes snapshots yet.</p>
+            )}
+          </div>
+          <div className="rounded-lg border border-border p-3 bg-[#0F1016]">
+            <p className="text-xs text-muted">Latest trade signal</p>
+            {latestSignal ? (
+              <>
+                <p className="text-sm font-semibold truncate">{latestSignal.market_name}</p>
+                <p className="text-xs text-muted">Signal: {latestSignal.signal_type || latestSignal.signal}</p>
+                <p className="text-xs text-muted">Prob: {(Number(latestSignal.estimated_probability || 0) * 100).toFixed(1)}%</p>
+                <p className="text-xs text-muted">Conf: {latestSignal.confidence}%</p>
+              </>
+            ) : (
+              <p className="text-sm text-muted">No live signal yet.</p>
+            )}
+          </div>
+          <div className="rounded-lg border border-border p-3 bg-[#0F1016]">
+            <p className="text-xs text-muted">Comparison</p>
+            {latestBayes && latestSignal ? (
+              <>
+                <p className="text-sm font-semibold">Bayes vs live signal</p>
+                <p className="text-xs text-muted">
+                  {latestBayes.posterior_action ?? "N/A"} vs {latestSignal.signal_type || latestSignal.signal}
+                </p>
+                <p className="text-xs text-muted">
+                  If these diverge, risk checks or cooldowns are intervening.
+                </p>
+              </>
+            ) : (
+              <p className="text-sm text-muted">Need both a snapshot and a signal to compare.</p>
+            )}
+          </div>
+        </div>
+      </section>
 
       {/* Stats row */}
       <div className="grid gap-4 md:grid-cols-3">
@@ -119,6 +232,7 @@ export function Dashboard() {
               const cost = p.cost ?? null;
               const currentVal = p.current_value ?? null;
               const pnlAbs = (cost != null && currentVal != null) ? currentVal - cost : p.pnl ?? null;
+              const pnlPoints = pnlAbs != null ? pnlAbs * 100 : null;
               const pnlPct = (cost != null && cost > 0 && pnlAbs != null)
                 ? (pnlAbs / cost) * 100
                 : p.pnl_pct ?? null;
@@ -139,9 +253,9 @@ export function Dashboard() {
                       </span>
                     </div>
                     <div className="text-right shrink-0">
-                      {pnlAbs != null && (
+                      {pnlPoints != null && (
                         <p className={`font-mono text-sm font-semibold ${pnlColor}`}>
-                          {isUp ? "+" : ""}₦{pnlAbs.toFixed(2)}
+                          {isUp ? "+" : ""}{pnlPoints.toFixed(1)}
                         </p>
                       )}
                       {pnlPct != null && (

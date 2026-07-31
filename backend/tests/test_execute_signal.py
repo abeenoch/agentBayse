@@ -4,6 +4,7 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 
+from app.models.trade import Trade
 from app.models.signal import Signal
 from app.services.trade_executor import execute_signal
 from app.database import Base
@@ -66,6 +67,11 @@ async def test_execute_signal_marks_executed():
         assert sig.status == "EXECUTED"
         assert sig.executed_order_id == "mock-order"
         assert sig.executed_at is not None
+        from sqlalchemy import select
+
+        trade = (await session.execute(select(Trade))).scalars().first()
+        assert trade is not None
+        assert trade.executed_at is not None
 
 
 @pytest.mark.asyncio

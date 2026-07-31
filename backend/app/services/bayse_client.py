@@ -363,6 +363,17 @@ class BayseClient:
             return {"outcomeBalances": [], "portfolioCost": 0, "portfolioCurrentValue": 0, "portfolioPercentageChange": 0}
         if path.startswith("/pm/orders") and method == "GET":
             return {"orders": [], "pagination": {"page": 1, "size": 20, "lastPage": 1, "totalCount": 0}}
+        if path.startswith("/pm/books"):
+            return {
+                "bids": [
+                    {"price": 0.48, "total": 1200},
+                    {"price": 0.46, "total": 900},
+                ],
+                "asks": [
+                    {"price": 0.52, "total": 1100},
+                    {"price": 0.54, "total": 700},
+                ],
+            }
         if path.endswith("/quote"):
             return {
                 "price": 0.5,

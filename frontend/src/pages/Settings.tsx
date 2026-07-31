@@ -10,6 +10,8 @@ export function Settings() {
     balance_floor: 0,
     min_confidence: 65,
     balance_reserve_pct: 0.30,
+    bayes_live_decision_mode: true,
+    bayes_state_key: "default",
   });
 
   useEffect(() => {
@@ -20,6 +22,8 @@ export function Settings() {
         balance_floor: config.balance_floor,
         min_confidence: config.min_confidence ?? 65,
         balance_reserve_pct: config.balance_reserve_pct ?? 0.30,
+        bayes_live_decision_mode: config.bayes_live_decision_mode ?? true,
+        bayes_state_key: config.bayes_state_key ?? "default",
       });
     }
   }, [config]);
@@ -32,6 +36,8 @@ export function Settings() {
       balance_floor: Number(form.balance_floor),
       min_confidence: Number(form.min_confidence),
       balance_reserve_pct: Number(form.balance_reserve_pct),
+      bayes_live_decision_mode: form.bayes_live_decision_mode,
+      bayes_state_key: form.bayes_state_key,
     });
   };
 
@@ -46,7 +52,6 @@ export function Settings() {
 
       <form className="space-y-4" onSubmit={onSubmit}>
         <div className="bg-surface border border-border rounded-xl p-4 space-y-4">
-
           <label className="flex items-center gap-3 cursor-pointer">
             <input
               type="checkbox"
@@ -57,6 +62,19 @@ export function Settings() {
             <div>
               <p className="font-medium">Autonomous trading</p>
               <p className="text-xs text-muted">Agent places bets automatically when signals pass all checks.</p>
+            </div>
+          </label>
+
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={form.bayes_live_decision_mode}
+              onChange={(e) => setForm((f) => ({ ...f, bayes_live_decision_mode: e.target.checked }))}
+              className="w-4 h-4"
+            />
+            <div>
+              <p className="font-medium">Bayes live decision mode</p>
+              <p className="text-xs text-muted">Use the feature encoder + Bayes posterior for live trades.</p>
             </div>
           </label>
 
@@ -101,7 +119,7 @@ export function Settings() {
           </label>
 
           <label className="text-sm flex flex-col gap-1">
-            <span className="font-medium">Balance floor (₦)</span>
+            <span className="font-medium">Balance floor</span>
             <input
               type="number"
               min={0}
@@ -110,6 +128,17 @@ export function Settings() {
               onChange={(e) => setForm((f) => ({ ...f, balance_floor: Number(e.target.value) }))}
             />
             <span className="text-xs text-muted">Stop all trading if wallet drops below this amount.</span>
+          </label>
+
+          <label className="text-sm flex flex-col gap-1">
+            <span className="font-medium">Bayes state key</span>
+            <input
+              type="text"
+              className="bg-[#0F1016] border border-border rounded-lg px-3 py-2 w-56"
+              value={form.bayes_state_key}
+              onChange={(e) => setForm((f) => ({ ...f, bayes_state_key: e.target.value }))}
+            />
+            <span className="text-xs text-muted">Named priors/calibration bucket used by the Bayes engine.</span>
           </label>
         </div>
 

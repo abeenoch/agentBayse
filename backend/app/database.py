@@ -18,6 +18,10 @@ async def init_db():
         analysis_state,
         agent_config,
         event_market,
+        feature_snapshot,
+        bayes_state,
+        bayes_backtest_snapshot,
+        bayes_training_run,
     )  # noqa: F401
 
     async with engine.begin() as conn:

@@ -15,6 +15,16 @@ class RiskCheckResult:
     reasons: List[str]
 
 
+def _resolve_balance(portfolio: dict) -> float | None:
+    if "_wallet_balance" in portfolio and portfolio.get("_wallet_balance") is not None:
+        return float(portfolio.get("_wallet_balance") or 0.0)
+
+    for key in ("portfolioCurrentValue", "availableBalance", "walletBalance", "balance"):
+        if key in portfolio and portfolio.get(key) is not None:
+            return float(portfolio.get(key) or 0.0)
+    return None
+
+
 def risk_guard(signal: dict, portfolio: dict, cfg=None) -> RiskCheckResult:
     if settings.mock_mode:
         return RiskCheckResult(passed=True, reasons=[])
@@ -31,16 +41,10 @@ def risk_guard(signal: dict, portfolio: dict, cfg=None) -> RiskCheckResult:
     if stake > settings.agent_max_position_size:
         reasons.append("stake exceeds max position size")
 
-    # Try wallet balance first (real cash), then fall back to portfolio fields
-    balance = (
-        portfolio.get("_wallet_balance")
-        or portfolio.get("portfolioCurrentValue")
-        or portfolio.get("availableBalance")
-        or portfolio.get("walletBalance")
-        or portfolio.get("balance")
-    )
+    # Prefer the explicitly resolved spendable wallet balance.
+    balance = _resolve_balance(portfolio)
 
-    if balance and float(balance) > 0 and not settings.agent_ignore_balance_check:
+    if balance is not None and float(balance) > 0 and not settings.agent_ignore_balance_check:
         balance = float(balance)
         deployed = float(portfolio.get("portfolioCost") or 0.0)
         deployable = balance * (1.0 - reserve_pct)

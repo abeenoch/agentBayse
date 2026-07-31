@@ -20,6 +20,7 @@ class Trade(Base):
     status = Column(String, nullable=False, default="PENDING_APPROVAL")
     source = Column(String, nullable=False, default="MANUAL")
     signal_id = Column(UUID(as_uuid=True), nullable=True)
+    bayes_state_key = Column(String, nullable=False, default="default")
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     executed_at = Column(DateTime, nullable=True)
     resolved_at = Column(DateTime, nullable=True)

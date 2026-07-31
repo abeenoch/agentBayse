@@ -102,6 +102,7 @@ export function Signals() {
                   {s.status}
                 </span>
                 <span className="px-2 py-0.5 rounded bg-border/40 text-muted">{s.risk_level}</span>
+                <span className="px-2 py-0.5 rounded bg-border/40 text-muted">{s.bayes_state_key || "default"}</span>
                 <span className="px-2 py-0.5 rounded bg-border/40 text-muted">₦{s.suggested_stake}</span>
                 {s.created_at && (
                   <span className="px-2 py-0.5 rounded bg-border/40 text-muted">
@@ -166,6 +167,7 @@ export function Signals() {
             <p>Probability: <span className="font-mono">{(selected.estimated_probability * 100)?.toFixed?.(1)}%</span></p>
             <p>Stake: <span className="font-mono">₦{selected.suggested_stake}</span></p>
             <p>Risk: {selected.risk_level}</p>
+            <p>Scope: <span className="font-mono">{selected.bayes_state_key || "default"}</span></p>
             {selected.pnl != null && (
               <p>P&L: <span className={`font-mono ${selected.pnl >= 0 ? "text-secondary" : "text-danger"}`}>
                 {selected.pnl >= 0 ? "+" : ""}{selected.pnl?.toFixed(2)}

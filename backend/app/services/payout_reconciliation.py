@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from collections.abc import Iterable
 from typing import Any
 
@@ -12,6 +13,19 @@ from app.services.outcome_sync import sync_signal_outcome
 
 def _activity_sort_key(activity: dict[str, Any]) -> str:
     return str(activity.get("createdAt") or activity.get("updatedAt") or "")
+
+
+def _normalize_activity_label(value: Any) -> str:
+    """
+    Normalize Bayse activity labels that may vary in punctuation/casing.
+
+    Examples:
+      - "PAYOUT WIN" -> "PAYOUT_WIN"
+      - "payout-loss" -> "PAYOUT_LOSS"
+      - " yes " -> "YES"
+    """
+    text = str(value or "").strip().upper()
+    return text.replace("-", "_").replace(" ", "_")
 
 
 def index_payout_activities(
@@ -82,8 +96,8 @@ def activity_outcome(activity: dict[str, Any]) -> tuple[str | None, float | None
       - market_resolution: WIN | LOSS | YES | NO | None
       - payout: numeric payout if present, otherwise None
     """
-    act_type = str(activity.get("type") or "").upper()
-    resolved_outcome = str(activity.get("resolvedOutcome") or "").upper()
+    act_type = _normalize_activity_label(activity.get("type"))
+    resolved_outcome = _normalize_activity_label(activity.get("resolvedOutcome"))
     payout_raw = activity.get("payout")
     payout = None
     if payout_raw is not None:
@@ -92,12 +106,12 @@ def activity_outcome(activity: dict[str, Any]) -> tuple[str | None, float | None
         except Exception:
             payout = None
 
-    if act_type == "PAYOUT_WIN":
+    if act_type in {"PAYOUT_WIN", "WIN"}:
         return "WIN", payout if payout is not None else 0.0
-    if act_type == "PAYOUT_LOSS":
+    if act_type in {"PAYOUT_LOSS", "LOSS"}:
         return "LOSS", payout if payout is not None else 0.0
 
-    if resolved_outcome in {"YES", "NO"}:
+    if resolved_outcome in {"YES", "NO", "WIN", "LOSS"}:
         return resolved_outcome, payout
 
     return None, payout
@@ -115,13 +129,16 @@ async def apply_activity_to_trade(
     if market_resolution is None:
         return None
 
-    terminal_outcome = str(activity.get("type") or "").upper()
-    if terminal_outcome == "PAYOUT_WIN":
+    terminal_outcome = _normalize_activity_label(activity.get("type"))
+    if terminal_outcome in {"PAYOUT_WIN", "WIN"}:
         trade.resolution = "WIN"
         trade.pnl = (payout or 0.0) - (trade.total_cost or 0)
-    elif terminal_outcome == "PAYOUT_LOSS":
+    elif terminal_outcome in {"PAYOUT_LOSS", "LOSS"}:
         trade.resolution = "LOSS"
         trade.pnl = -(trade.total_cost or 0)
+    if trade.status == "STALE":
+        trade.status = "EXECUTED"
+    trade.resolved_at = trade.resolved_at or datetime.utcnow()
 
     session.add(trade)
     signal = await sync_signal_outcome(

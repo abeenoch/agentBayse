@@ -14,6 +14,8 @@ DEFAULT_CONFIG = {
     "balance_floor": 0.0,
     "min_confidence": settings.agent_min_confidence,
     "balance_reserve_pct": settings.agent_balance_reserve_pct,
+    "bayes_live_decision_mode": settings.bayes_live_decision_mode,
+    "bayes_state_key": settings.bayes_state_key,
 }
 
 
@@ -30,6 +32,12 @@ async def get_config(session: AsyncSession) -> AgentConfig:
             updated = True
         if getattr(cfg, "balance_reserve_pct", None) is None:
             cfg.balance_reserve_pct = settings.agent_balance_reserve_pct
+            updated = True
+        if getattr(cfg, "bayes_live_decision_mode", None) is None:
+            cfg.bayes_live_decision_mode = settings.bayes_live_decision_mode
+            updated = True
+        if getattr(cfg, "bayes_state_key", None) in (None, ""):
+            cfg.bayes_state_key = settings.bayes_state_key
             updated = True
         if updated:
             await session.commit()

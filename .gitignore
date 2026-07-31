@@ -23,6 +23,8 @@ backend/bayse_agent.db
 backend/*.sqlite
 backend/chroma_db/
 docs/
+backend/scripts/
+backend/exports/
 
 # Caches
 .pytest_cache/

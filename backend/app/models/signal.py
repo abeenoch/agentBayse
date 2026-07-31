@@ -26,6 +26,7 @@ class Signal(Base):
     status = Column(String, nullable=False, default="PENDING")
     resolution = Column(String, nullable=True)
     pnl = Column(Float, nullable=True)
+    bayes_state_key = Column(String, nullable=False, default="default")
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     approved_at = Column(DateTime, nullable=True)
     agent_cycle_id = Column(String, nullable=True)
