@@ -7,7 +7,7 @@ from app.config import settings
 # Defaults seeded from env so first-run behavior mirrors operator intent.
 DEFAULT_CONFIG = {
     "auto_trade": settings.agent_auto_trade,
-    "categories": ["finance"],
+    "categories": ["crypto"],
     "max_trades_per_hour": 10,
     "max_trades_per_day": settings.agent_max_daily_trades,
     "max_open_positions": settings.agent_max_open_positions,

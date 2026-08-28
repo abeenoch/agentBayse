@@ -14,8 +14,9 @@ async def list_markets(
     size: int = 50,
     client: BayseClient = Depends(get_bayse_client),
 ):
-    # Enforce finance-only scope by default so stray callers don't pull other categories.
-    effective_category = category or "finance"
+    # Default to crypto scope (the agent now trades 1-hour crypto series) so the
+    # Markets page shows crypto rather than finance when no category is requested.
+    effective_category = category or "crypto"
     return await client.list_events(
         category=effective_category,
         status=status,

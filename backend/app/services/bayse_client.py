@@ -38,7 +38,8 @@ class BayseClient:
     def minimum_order_amount(self, currency: str | None = None) -> float:
         curr = (currency or self.default_currency or "").strip().upper()
         if curr == "NGN":
-            return 100.0
+            # Bayse AMM markets (incl. crypto 1h) enforce a NGN 500 minimum buy.
+            return 500.0
         return 1.0
 
     async def _request(self, method: str, path: str, params: dict | None = None, json_body: dict | None = None, signed: bool = False):

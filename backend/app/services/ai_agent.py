@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.analysis_state import AnalysisState
 from app.models.event_market import EventMarket
-from app.services.analysis import calculate_expected_value, analyze_order_book_depth
+from app.services.analysis import calculate_expected_value, analyze_order_book_depth, detect_price_momentum
 from app.services.bayes_model import BayesDecisionContext, BayesLinearPolicy, BayesPolicyInput, get_bayes_model
 from app.services.bayes_state_keys import build_bayes_state_key_candidates, resolve_bayes_state_key
 from app.services.bayes_training import resolve_live_training_run
@@ -182,6 +182,7 @@ def _build_user_prompt(
     portfolio_ctx: dict | None = None,
     time_remaining: str = "unknown",
     timeframe: str = "unknown",
+    momentum: str | None = None,
 ) -> str:
     lines = []
 
@@ -211,6 +212,9 @@ def _build_user_prompt(
         f"Current YES price: {yes_price:.4f}  →  buy YES only if your YES probability > {yes_price:.4f}",
         f"Current NO price:  {no_price:.4f}  →  buy NO  only if your NO probability  > {no_price:.4f}",
     ]
+
+    if momentum:
+        lines.append(f"Price momentum (1h): {momentum}")
 
     if abs(yes_price - no_price) < 0.02:
         lines.append(
@@ -455,21 +459,53 @@ class AIAgent:
         fallback_sources = [r.get("url", "") for r in raw if r.get("url")][:5]
         fallback_snippets = [r.get("snippet") or r.get("title") or "" for r in raw][:5]
 
-        # Skip 50/50 markets with no useful news — pure coin flip, no edge
+        # Retrieve relevant context from RAG knowledge base FIRST
+        # so the pre-filter can check for RAG context too
+        from app.services import rag as rag_service
+        rag_chunks: list[str] = rag_service.query(title, k=5) if rag_service is not None else []
+
+        # Information-advantage pre-filter: skip if no useful information available
         is_fifty_fifty = abs(yes_price - no_price) < 0.02
         has_useful_news = any(len(s) > 50 for s in fallback_snippets)
+        has_rag_context = bool(rag_chunks)
+        # FX and crypto-1h markets are price/momentum-driven — we can reason about
+        # them even without news, so they bypass the news/context requirement below.
+        is_fx_market = any(term in (title or "").lower() for term in ["usd/ngn", "gbp/ngn", "eur/usd", "usd/", "/ngn", "naira", "dollar to naira"])
+        is_crypto_series = (series_slug or "").lower().startswith("crypto-")
+        is_price_driven_market = is_fx_market or is_crypto_series
         if is_fifty_fifty and not has_useful_news:
             logger.info(
                 "Skipping %s — 50/50 market with no useful news context", market_id
             )
             return None
+        # Broader filter: if no news AND no RAG AND not price-driven, we have no edge
+        if not has_useful_news and not has_rag_context and not is_price_driven_market:
+            logger.info(
+                "Skipping %s — no information advantage (no news, no RAG context, not a price-driven series)",
+                market_id,
+            )
+            return None
+
+        # Minimum edge pre-filter: if the favoured side is priced too close to 50/50
+        # we likely have no edge after Bayse's fee. The required gap scales with the
+        # market's actual fee (default 15% for FX; crypto AMM markets charge ~5%).
+        # This check uses raw prices before the LLM call to save inference cost.
+        _min_price = min(yes_price, no_price)
+        _max_price = max(yes_price, no_price)
+        fee_pct = float(market.get("feePercentage") or 15.0)
+        required_edge = max(0.03, (fee_pct / 100.0) * 0.67)
+        _price_edge = _max_price - 0.5  # how far the favoured side is from 50/50
+        if _price_edge < required_edge and is_fifty_fifty is False:
+            # Market is close to 50/50 — we need enough of a gap to have any
+            # hope of edge after the fee. Log and skip early.
+            logger.info(
+                "Skipping %s — market too close to 50/50 (yes=%.3f no=%.3f edge=%.3f < %.3f)",
+                market_id, yes_price, no_price, _price_edge, required_edge,
+            )
+            return None
 
         # Ingest into RAG (non-blocking — fire and forget)
-        from app.services import rag as rag_service
         asyncio.create_task(rag_service.ingest_market(title, raw))
-
-        # Retrieve relevant context from RAG knowledge base
-        rag_chunks = rag_service.query(title, k=5)
 
         # Fetch prior signal history for this market
         history: list[dict] = []
@@ -597,6 +633,7 @@ class AIAgent:
             "liquidity": market.get("liquidity"),
             "volume": market.get("totalVolume") or market.get("volume"),
             "dependency_risk": 0.5,
+            "momentum": None,  # populated below after price history fetch
         }
 
         features = None
@@ -670,6 +707,28 @@ class AIAgent:
             "recent_record": recent_record,
         }
 
+        # Fetch price history and calculate momentum
+        price_momentum = None
+        try:
+            if event_id:
+                # The Bayse price-history endpoint only accepts timePeriod=24H (1H/1D return 400),
+                # and returns {"markets": [{"marketId", "priceHistory": [{"e", "p"}]}]}.
+                price_data = await self.bayse.price_history(event_id, time_period="24H", outcome="YES", market_ids=[market_id])
+                if price_data and isinstance(price_data, dict):
+                    markets = price_data.get("markets") or []
+                    matched = next((m for m in markets if m.get("marketId") == market_id), markets[0] if markets else None)
+                    if matched:
+                        points = matched.get("priceHistory") or []
+                        if len(points) >= 2:
+                            prices = [float(p.get("p")) for p in points if p.get("p") is not None]
+                            if len(prices) >= 2:
+                                price_momentum = detect_price_momentum(prices, window=min(len(prices), 10))
+        except Exception as exc:
+            logger.debug("Price history fetch failed for %s: %s", market_id, exc)
+
+        # Inject momentum into feature context so the encoder can use it
+        feature_context["momentum"] = price_momentum
+
         user_prompt = _build_user_prompt(
             market_id=market_id,
             market_name=title,
@@ -683,6 +742,7 @@ class AIAgent:
             portfolio_ctx=portfolio_ctx,
             time_remaining=time_remaining_str,
             timeframe=timeframe_str,
+            momentum=price_momentum,
         )
 
         output: Optional[SignalOutput] = None
@@ -708,6 +768,8 @@ class AIAgent:
                 open_positions,
                 confidence,
                 cfg,
+                estimated_probability=direction_prob,
+                market_price=ref_price,
             )
             output = SignalOutput(
                 market_id=market_id,
@@ -777,6 +839,8 @@ class AIAgent:
                 open_positions,
                 output.confidence,
                 cfg,
+                estimated_probability=direction_prob,
+                market_price=ref_price,
             )
             output.suggested_stake = stake
             output.current_market_price = ref_price
@@ -943,17 +1007,19 @@ class AIAgent:
                 return None
 
         saved_signal = None
+        signal_payload = dict(signal.__dict__)
+        signal_payload["bayes_state_key"] = selected_bayes_state_key
+        signal_payload["event_id"] = signal_payload.get("event_id") or (event_data.get("id") if isinstance(event_data, dict) else None) or event_id or market_id
+
         if session is not None:
-            # Only persist actionable signals — HOLD/AVOID are noise in the DB
-            if signal.signal in ("BUY_YES", "BUY_NO"):
-                signal_payload = dict(signal.__dict__)
-                signal_payload["bayes_state_key"] = selected_bayes_state_key
-                saved_signal = await save_signal(session, signal_payload)
-                await link_feature_snapshot(
-                    session,
-                    market_id=market_id,
-                    signal_id=saved_signal.id,
-                )
+            # Persist ALL signals (including HOLD/AVOID/SELL) so we can track
+            # outcomes and use them for Bayes calibration even when we don't bet.
+            saved_signal = await save_signal(session, signal_payload)
+            await link_feature_snapshot(
+                session,
+                market_id=market_id,
+                signal_id=saved_signal.id,
+            )
 
             db_state = (
                 await session.get(AnalysisState, market_id)
@@ -972,7 +1038,8 @@ class AIAgent:
 
             await session.commit()
 
-            if cfg and getattr(cfg, "auto_trade", False) and saved_signal is not None:
+            # Auto-trade only BUY_YES and BUY_NO signals
+            if cfg and getattr(cfg, "auto_trade", False) and signal.signal in ("BUY_YES", "BUY_NO"):
                 try:
                     executed = await execute_signal_with_controls(
                         session,
@@ -1012,38 +1079,62 @@ class AIAgent:
         open_positions: int,
         confidence: int,
         cfg=None,
+        estimated_probability: float | None = None,
+        market_price: float | None = None,
     ) -> float:
         """
-        Fractional Kelly stake sizing with hard balance reserve enforcement.
-        - Base slot = deployable capital / max_open_positions
-        - High-confidence (>=80) gets 1.5x slot
-        - LLM suggestion is respected if it's within the slot (conservative is fine)
-        - Hard floor: ₦100, hard cap: available_to_deploy
+        Kelly criterion stake sizing with hard fraction cap.
+
+        Formula: stake = kelly_fraction * KELLY_CAP * bankroll
+          where kelly_fraction = (b*p - q) / b  (full Kelly)
+                KELLY_CAP      = 0.10            (never risk more than 10% of bankroll)
+                bankroll       = total wallet balance (not just deployable slice)
+
+        Falls back to slot-based sizing when Kelly inputs are missing or return 0.
+        Hard floor: Bayse minimum order amount, hard ceiling: agent_max_position_size.
         """
+        KELLY_CAP = 0.10  # fraction of total bankroll, never exceed 10%
         max_open = getattr(cfg, "max_open_positions", settings.agent_max_open_positions) if cfg else settings.agent_max_open_positions
+        min_stake = self.bayse.minimum_order_amount()
 
-        # Base slot = deployable capital divided equally across all slots
-        base_slot = available_to_deploy / max_open if max_open > 0 else available_to_deploy
+        # Use total wallet balance as bankroll — Kelly needs the full picture,
+        # not the remaining deployable slice, to size correctly.
+        bankroll = balance if balance > 0 else available_to_deploy
 
-        # High conviction multiplier
-        if confidence >= 80:
-            base_slot = min(base_slot * 1.5, available_to_deploy)
+        stake = 0.0
+        if (
+            estimated_probability is not None
+            and market_price is not None
+            and market_price > 0
+            and bankroll > 0
+        ):
+            from app.services.analysis import calculate_kelly_criterion
+            kelly_fraction = calculate_kelly_criterion(estimated_probability, market_price)
+            if kelly_fraction > 0:
+                # Cap Kelly fraction at KELLY_CAP — never go full Kelly on a single bet
+                capped_fraction = min(kelly_fraction, KELLY_CAP)
+                stake = capped_fraction * bankroll
+                logger.debug(
+                    "Kelly sizing: prob=%.3f price=%.3f raw_kelly=%.4f capped=%.4f bankroll=%.0f stake=%.0f",
+                    estimated_probability, market_price, kelly_fraction, capped_fraction, bankroll, stake,
+                )
 
-        # Use LLM suggestion if it's reasonable and lower than our slot
-        # (agent being conservative is fine; agent being aggressive is not)
-        if raw_stake and 100 <= raw_stake < base_slot:
-            base_slot = raw_stake
+        if stake < min_stake:
+            # Kelly returned 0 (no edge) or below minimum — fall back to slot-based
+            base_slot = available_to_deploy / max(max_open, 1)
+            if confidence >= 80:
+                base_slot = min(base_slot * 1.25, available_to_deploy)
+            stake = base_slot
 
-        stake = min(base_slot, settings.agent_max_position_size, available_to_deploy)
-        if available_to_deploy >= 100.0:
-            stake = max(stake, 100.0)
-        stake = min(stake, available_to_deploy)
+        # Never exceed one slot of the deployable budget regardless of Kelly output
+        slot_cap = available_to_deploy / max(max_open, 1) if available_to_deploy > 0 else settings.agent_max_position_size
+        stake = min(stake, slot_cap, settings.agent_max_position_size, available_to_deploy)
+
+        # Hard floor: never drop below the exchange minimum when deployable allows
+        if available_to_deploy >= min_stake:
+            stake = max(stake, min_stake)
+
         return round(max(stake, 0.0), 2)
-
-        # Hard caps: never exceed available_to_deploy or agent_max_position_size
-        stake = min(base_slot, settings.agent_max_position_size, available_to_deploy)
-        stake = max(stake, 100.0)  # ₦100 minimum
-        return round(stake, 2)
 
     def _market_hotness(self, market: dict) -> float:
         liquidity = float(market.get("liquidity") or 0)
@@ -1155,6 +1246,17 @@ class AIAgent:
             data["market_name"] = title
             output = SignalOutput(**data)
 
+            # Normalize price/probability to the chosen side. The model often echoes
+            # the market's YES/UP price onto a BUY_NO signal; leaving that in makes EV
+            # tiny and the risk guard rejects every NO. Recompute against the actual
+            # NO/Down price and keep estimated_probability as the chosen-side prob.
+            ref_price = self._pick_price_for_signal(output.signal, yes_price, no_price)
+            direction_prob = self._direction_probability(output.signal, output.estimated_probability)
+            if direction_prob <= ref_price:
+                direction_prob = min(ref_price + 0.05, 0.95)
+            output.current_market_price = ref_price
+            output.estimated_probability = direction_prob
+
             if session is not None:
                 try:
                     encoder = get_feature_encoder()
@@ -1180,7 +1282,17 @@ class AIAgent:
             open_pos = len([b for b in (portfolio.get("outcomeBalances") or []) if b])
             available_to_deploy = max(snipe_balance * (1 - reserve_pct) - deployed, 0.0)
             output.suggested_stake = self._normalized_stake(
-                output.suggested_stake, snipe_balance, available_to_deploy, open_pos, output.confidence, None
+                output.suggested_stake, snipe_balance, available_to_deploy, open_pos, output.confidence, None,
+                estimated_probability=output.estimated_probability,
+                market_price=output.current_market_price,
+            )
+
+            # Recompute EV against the corrected price/probability and final stake so
+            # the risk guard sees the true edge (e.g. BUY_NO on Down priced ~0.005).
+            output.expected_value = calculate_expected_value(
+                prob=output.estimated_probability,
+                price=output.current_market_price,
+                stake=output.suggested_stake,
             )
 
             return output

@@ -32,6 +32,7 @@ from app.services.scheduler import collect_live_trade_diagnostics
 from app.services.scheduler import normalize_terminal_trades
 from app.dependencies import get_current_user
 from app.services.execution_control import execute_signal_with_controls
+from app.services.confidence_calibration import compute_calibration, calibration_to_dict
 from app.websocket_manager import manager
 from sqlalchemy import select
 
@@ -103,14 +104,43 @@ async def bayes_snapshots(
     return {"snapshots": serialized, "page": page, "size": limit, "count": total, "total": total}
 
 
+async def _resolve_active_bayes_key(session: AsyncSession, explicit: str | None = None) -> str:
+    """
+    Resolve the Bayes state key the dashboard/tools should operate on.
+
+    Honors an explicit override. Otherwise it follows the live pipeline: the key
+    of the most recently placed bet, so the report/live-training view tracks the
+    last bet's coin (ETH/BTC/SOL) and changes as new bets land. Falls back to the
+    configured base key before any bets exist.
+    """
+    explicit_key = (explicit or "").strip()
+    if explicit_key:
+        return explicit_key
+
+    last = await session.execute(
+        select(Signal.bayes_state_key)
+        .where(Signal.executed_at.isnot(None), Signal.bayes_state_key.isnot(None))
+        .order_by(Signal.executed_at.desc())
+        .limit(1)
+    )
+    row = last.first()
+    if row and (row[0] or "").strip():
+        return row[0].strip()
+
+    cfg = await get_config(session)
+    configured = (getattr(cfg, "bayes_state_key", None) or "").strip()
+    if configured:
+        return configured
+    return settings.bayes_state_key or "default"
+
+
 @router.get("/bayes/report")
 async def bayes_report(
     state_key: str | None = None,
     session: AsyncSession = Depends(get_session),
 ):
     metrics = await feature_snapshot_metrics(session)
-    cfg = await get_config(session)
-    resolved_state_key = state_key or getattr(cfg, "bayes_state_key", "default") or "default"
+    resolved_state_key = await _resolve_active_bayes_key(session, explicit=state_key)
     state = await get_bayes_state(session, state_key=resolved_state_key)
     live_training_run, resolved_live_training_state_key = await resolve_live_training_run(
         session,
@@ -146,8 +176,7 @@ async def rebuild_bayes_state(
     state_key: str | None = None,
     session: AsyncSession = Depends(get_session),
 ):
-    cfg = await get_config(session)
-    key = state_key or getattr(cfg, "bayes_state_key", "default") or "default"
+    key = await _resolve_active_bayes_key(session, explicit=state_key)
     return await rebuild_bayes_state_from_resolved_trades(session, state_key=key)
 
 
@@ -156,8 +185,7 @@ async def bayes_audit(
     state_key: str | None = None,
     session: AsyncSession = Depends(get_session),
 ):
-    cfg = await get_config(session)
-    key = state_key or getattr(cfg, "bayes_state_key", "default") or "default"
+    key = await _resolve_active_bayes_key(session, explicit=state_key)
     return await build_yes_no_audit(session, state_key=key)
 
 
@@ -166,8 +194,7 @@ async def bayes_calibration(
     state_key: str | None = None,
     session: AsyncSession = Depends(get_session),
 ):
-    cfg = await get_config(session)
-    key = state_key or getattr(cfg, "bayes_state_key", "default") or "default"
+    key = await _resolve_active_bayes_key(session, explicit=state_key)
     return await build_calibration_audit(session, state_key=key)
 
 
@@ -176,8 +203,7 @@ async def bayes_train(
     state_key: str | None = None,
     session: AsyncSession = Depends(get_session),
 ):
-    cfg = await get_config(session)
-    key = state_key or getattr(cfg, "bayes_state_key", "default") or "default"
+    key = await _resolve_active_bayes_key(session, explicit=state_key)
     return await train_bayes_model(session, state_key=key)
 
 
@@ -186,8 +212,7 @@ async def bayes_eval(
     state_key: str | None = None,
     session: AsyncSession = Depends(get_session),
 ):
-    cfg = await get_config(session)
-    key = state_key or getattr(cfg, "bayes_state_key", "default") or "default"
+    key = await _resolve_active_bayes_key(session, explicit=state_key)
     return await build_offline_eval_report(session, state_key=key)
 
 
@@ -196,8 +221,7 @@ async def bayes_train_latest(
     state_key: str | None = None,
     session: AsyncSession = Depends(get_session),
 ):
-    cfg = await get_config(session)
-    key = state_key or getattr(cfg, "bayes_state_key", "default") or "default"
+    key = await _resolve_active_bayes_key(session, explicit=state_key)
     run = await get_latest_training_run(session, state_key=key)
     if run is None:
         return None
@@ -221,10 +245,9 @@ async def bayes_train_latest(
 async def bayes_live_training(
     session: AsyncSession = Depends(get_session),
 ):
-    cfg = await get_config(session)
     live_training_run, resolved_state_key = await resolve_live_training_run(
         session,
-        state_key=getattr(cfg, "bayes_state_key", None) or settings.bayes_state_key,
+        state_key=await _resolve_active_bayes_key(session),
         default_key=settings.bayes_state_key,
     )
     if live_training_run is None:
@@ -509,3 +532,13 @@ async def write_config(payload: dict, session: AsyncSession = Depends(get_sessio
         "bayes_live_decision_mode": getattr(cfg, "bayes_live_decision_mode", True),
         "bayes_state_key": getattr(cfg, "bayes_state_key", "default"),
     }
+@router.get("/calibration")
+async def calibration_report(
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    Compute LLM confidence calibration from resolved signals.
+    Returns calibration bins showing actual win rate vs predicted confidence.
+    """
+    report = await compute_calibration(session)
+    return calibration_to_dict(report)

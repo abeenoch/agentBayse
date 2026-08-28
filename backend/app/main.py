@@ -32,6 +32,11 @@ def create_app() -> FastAPI:
     async def run_startup_reconciliation() -> None:
         await init_db()
         async with AsyncSessionLocal() as session:
+            # Seed neutral 50/50 Bayes priors for the automated crypto series so
+            # crypto learning starts fresh instead of inheriting FX history in 'default'.
+            from app.services.storage import crypto_bayes_state_keys, ensure_bayes_state
+            for key in crypto_bayes_state_keys():
+                await ensure_bayes_state(session, state_key=key)
             normalized_count = await normalize_terminal_trades(session)
             checked_count, resolved_count = await reconcile_open_trades(session, get_bayse_client())
             from app.utils.logger import logger

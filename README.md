@@ -15,14 +15,14 @@ flowchart LR
     Chroma[("ChromaDB")]
     BayseAPI["Bayse Markets API"]
     LLM["LLM Providers"]
-    Tavily["Tavily Search"]
+    Search["DuckDuckGo Search"]
 
     Dashboard --> Server
     Server --> Postgres
     Server --> Chroma
     Server --> BayseAPI
     Server --> LLM
-    Server --> Tavily
+    Server --> Search
 
     style Dashboard fill:#1e1b4b,stroke:#6366f1,stroke-width:2px,color:#fff
     style Server fill:#2e1065,stroke:#8b5cf6,stroke-width:2px,color:#fff
@@ -30,7 +30,7 @@ flowchart LR
     style Chroma fill:#4c0519,stroke:#ef4444,stroke-width:2px,color:#fff
     style BayseAPI fill:#451a03,stroke:#f59e0b,stroke-width:2px,color:#fff
     style LLM fill:#451a03,stroke:#f59e0b,stroke-width:2px,color:#fff
-    style Tavily fill:#451a03,stroke:#f59e0b,stroke-width:2px,color:#fff
+    style Search fill:#451a03,stroke:#f59e0b,stroke-width:2px,color:#fff
 ```
 
 ## Features
@@ -40,12 +40,12 @@ flowchart LR
 The core agent runs on a schedule, scanning configured prediction markets. For each market it:
 
 - Checks cooldowns so it doesn't re-analyze too quickly.
-- Fetches live YES/NO prices, closing time, and relevant news via Tavily.
+- Fetches live YES/NO prices, closing time, and relevant news via DuckDuckGo (free, no API key).
 - Retrieves background knowledge from a ChromaDB vector store (RAG).
-- Considers portfolio state: wallet balance, open positions, recent win/loss record.
+- Considers portfolio state: wallet balance, open positions, recent win/loss record, and live Bayes posterior.
 - Sends everything to an LLM with a structured prompt, which returns a trading signal with confidence, suggested stake, and risk level.
 - Validates the signal through a multi‑layer risk guard (EV, confidence, balance reserve, position cap).
-- Optionally places the trade directly on Bayse Markets.
+- Optionally places the trade directly on Bayse Markets when auto-trade is enabled.
 
 This flow repeats for every open market, making the agent fully hands‑off once configured.
 
@@ -53,7 +53,7 @@ This flow repeats for every open market, making the agent fully hands‑off once
 sequenceDiagram
     actor Agent
     participant BayseAPI as Bayse API
-    participant Search as Tavily Search
+    participant Search as DuckDuckGo Search
     participant RAG as ChromaDB
     participant LLM as LLM
     participant DB as Database
@@ -61,7 +61,7 @@ sequenceDiagram
     Agent->>BayseAPI: Fetch open markets
     BayseAPI-->>Agent: Market list
     loop for each market
-        Agent->>Search: Search for recent news
+        Agent->>Search: Search for recent news (DuckDuckGo)
         Search-->>Agent: News snippets
         Agent->>RAG: Retrieve relevant knowledge
         RAG-->>Agent: Context chunks
@@ -89,15 +89,19 @@ The agent enforces multiple safeguards before any bet reaches the exchange:
 - **Balance reserve** – a percentage of the wallet is kept untouched.
 - **Position cap** – maximum simultaneous open bets.
 - **50/50 skip** – markets exactly at 50/50 with no useful news are ignored.
-- **Stop‑loss** – automatically sells if a position loses more than a configured percentage.
+- **Stop‑loss** – automatically sells if a position loses more than a configured percentage (default 30%).
+- **Take‑profit** – automatically sells if a position gains more than a configured percentage (default 40%), with partial exit mode to recover cost basis only.
+- **Bayes model training** – a logistic regression model is trained on all resolved signals (including non-executed predictions) every 6 hours, per crypto series state key.
 
 These checks are applied both during the analysis phase and at the moment of execution, serialised through a lock to prevent race conditions.
 
-### Sniper & Stop‑Loss
+### Sniper, Stop‑Loss & Take‑Profit
 
 For short‑interval markets (e.g., crypto 5‑minute), a dedicated sniper scans every 30 seconds for markets closing soon. It uses a faster LLM prompt with live ticker data and decides whether to enter, wait, or skip. Once the agent recommends entering, the position is taken immediately.
 
 A parallel stop‑loss loop runs every 15 seconds, reading live portfolio values from Bayse. If a position has dropped past the stop‑loss threshold, a market sell order is placed to cut the loss.
+
+A take‑profit scanner runs every 20 seconds, checking all open positions. When a position gains more than the configured threshold (default 40%), it sells in **partial exit mode** — enough shares to recover the original cost basis, keeping the rest as a "free bet" riding to resolution. The full exit mode sells the entire position.
 
 ```mermaid
 sequenceDiagram
@@ -127,13 +131,28 @@ sequenceDiagram
     loop every 15s
         Agent->>BayseAPI: Get portfolio outcomeBalances
         BayseAPI-->>Agent: Positions
-        Agent->>Agent: Check stop‑loss threshold
+        Agent->>Agent: Check stop‑loss threshold (30%)
         alt loss exceeds threshold
             Agent->>BayseAPI: Place SELL order
             BayseAPI-->>Agent: Sell confirmation
         end
     end
+
+    loop every 20s
+        Agent->>BayseAPI: Get portfolio outcomeBalances
+        BayseAPI-->>Agent: Positions
+        Agent->>Agent: Check take‑profit threshold (40%)
+        alt profit exceeds threshold
+            Agent->>Agent: Partial exit (sell cost basis)
+            Agent->>BayseAPI: Place SELL order
+            BayseAPI-->>Agent: Sell confirmation
+        end
+    end
 ```
+
+### Signal Outcome Tracking
+
+Every signal generated by the agent — including HOLD, AVOID, and BUY_YES/BUY_NO predictions that were never traded — is persisted to the database. A background reconciler runs every 5 minutes, checking unresolved signals against Bayse market outcomes. Resolved signals feed into the Bayesian model with a configurable weight multiplier (default 0.5x), dramatically increasing the training corpus.
 
 ### Live Dashboard
 
@@ -154,7 +173,7 @@ The dashboard connects to the backend via WebSocket for live updates on signals,
 - Python 3.11+
 - Node.js 18+
 - PostgreSQL 14+
-- API keys for Bayse, at least one LLM provider (Groq / Gemini / OpenAI / Anthropic), and Tavily.
+- API keys for Bayse, at least one LLM provider (Groq / Gemini / OpenAI / Anthropic), and optionally a Tavily key.
 
 ### Clone the Repository
 
@@ -401,7 +420,7 @@ All settings live in `backend/.env`. Copy `.env.example` and fill in your inform
 | `GEMINI_MODEL` | Gemini model name | `gemini-2.5-flash` |
 | `ANTHROPIC_API_KEY` | Anthropic API key | — |
 | `OPENAI_API_KEY` | OpenAI API key | — |
-| `SEARCH_PROVIDER` | Search backend | `tavily` |
+| `SEARCH_PROVIDER` | Search backend (`duckduckgo` or `tavily`) | `duckduckgo` |
 | `TAVILY_API_KEY` | Tavily search API key | — |
 | `SEARCH_INCLUDE_DOMAINS` | Comma‑separated preferred domains | — |
 | `SEARCH_EXCLUDE_DOMAINS` | Comma‑separated blocked domains | — |
@@ -415,7 +434,11 @@ All settings live in `backend/.env`. Copy `.env.example` and fill in your inform
 | `AGENT_SERIES_SLUGS` | Comma‑separated series to scan (empty = all known) | — |
 | `SNIPE_SERIES_SLUGS` | Series for the sniper | `crypto‑btc‑5min,...` |
 | `SNIPE_OBSERVE_SECONDS` | How far out sniper starts watching | `300` |
-| `STOP_LOSS_PCT` | Loss fraction to trigger sell | `0.35` |
+| `STOP_LOSS_PCT` | Loss fraction to trigger sell | `0.30` |
+| `TAKE_PROFIT_PCT` | Profit fraction to trigger take-profit sell | `0.40` |
+| `TAKE_PROFIT_PARTIAL_EXIT` | Sell only cost basis (partial exit) | `true` |
+| `SIGNAL_RECONCILE_INTERVAL_SECONDS` | How often to check non-executed signal outcomes | `300` |
+| `SIGNAL_OUTCOME_WEIGHT` | Weight multiplier for non-executed signals in Bayes training | `0.50` |
 | `BAYES_LIVE_DECISION_MODE` | Use Bayes encoder for live decisions | `true` |
 | `BAYES_STATE_KEY` | Bayes state key | `default` |
 | `MOCK_MODE` | Use mock responses (no real API calls) | `true` |
@@ -432,7 +455,7 @@ All settings live in `backend/.env`. Copy `.env.example` and fill in your inform
 | LLM Providers | [Groq](https://groq.com/) · [Google Gemini](https://ai.google.dev/) · [OpenAI](https://openai.com/) · [Anthropic](https://www.anthropic.com/) |
 | Frontend      | [React 18](https://react.dev/) · [Vite](https://vitejs.dev/) · [TypeScript](https://www.typescriptlang.org/) · [TailwindCSS](https://tailwindcss.com/) |
 | Monitoring    | [Recharts](https://recharts.org/) · [React Query](https://tanstack.com/query)                                      |
-| Search        | [Tavily](https://tavily.com/)                                                                                      |
+| Search        | [DuckDuckGo](https://duckduckgo.com/) (via `ddgs`) · [Tavily](https://tavily.com/)                                                                                      |
 | Exchange API  | [Bayse Markets](https://bayse.markets/)                                                                            |
 
 ## Contributing

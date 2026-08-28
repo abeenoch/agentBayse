@@ -7,6 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.config import settings
 from app.services.feature_encoder import FeatureEncoding
 
 
@@ -206,6 +207,13 @@ class BayesLinearPolicy:
         artifact = BayesTrainingArtifact.from_training_run(run)
         if not artifact.is_usable():
             return None
+        # Minimum-sample gate: a model trained on a handful of resolved trades is
+        # statistically meaningless and would override the live Bayesian posterior
+        # with memorized noise. Keep it as a dashboard artifact until it has seen
+        # enough outcomes to be trustworthy.
+        sample_size = int(getattr(run, "sample_size", 0) or 0)
+        if sample_size < settings.agent_min_train_samples:
+            return None
         return cls(artifact)
 
     def score_candidate(
@@ -252,7 +260,7 @@ class BayesLinearPolicy:
     ) -> str:
         if context.max_open_positions and context.open_positions >= context.max_open_positions:
             return "AVOID"
-        if uncertainty >= 0.60:
+        if uncertainty >= 0.75:
             return "AVOID"
 
         yes_edge = None if context.yes_price is None else posterior_yes - context.yes_price
@@ -412,7 +420,9 @@ class BayesModel:
     ) -> str:
         if context.max_open_positions and context.open_positions >= context.max_open_positions:
             return "AVOID"
-        if uncertainty >= 0.60:
+        # Only AVOID on very high uncertainty — 0.60 was too aggressive with no training data.
+        # Once calibration data accumulates, this can tighten back to 0.65.
+        if uncertainty >= 0.75:
             return "AVOID"
 
         yes_edge = None if context.yes_price is None else posterior_yes - context.yes_price

@@ -16,7 +16,7 @@ Stop-loss:
   Every 60s, check open positions via ticker. Sell if loss >= STOP_LOSS_PCT.
 
 Env:
-  SNIPE_SERIES_SLUGS    - series to watch (default: crypto-sol-5min,crypto-btc-5min,...)
+  SNIPE_SERIES_SLUGS    - series to watch (default: crypto-btc-1h,crypto-eth-1h,crypto-sol-1h)
   SNIPE_OBSERVE_SECONDS - how far out to start watching (default: 300 = 5 min)
   SNIPE_MIN_SECONDS     - abort if less than this many seconds remain (default: 8)
   STOP_LOSS_PCT         - loss fraction to trigger sell (default: 0.35)
@@ -219,7 +219,7 @@ async def snipe_scan():
     """Detect markets entering the observation window and spawn watcher tasks."""
     observe_secs: int = getattr(settings, "snipe_observe_seconds", 300)
     min_secs: int = getattr(settings, "snipe_min_seconds", 8)
-    slugs_raw: str = getattr(settings, "snipe_series_slugs", "crypto-sol-5min,crypto-btc-5min")
+    slugs_raw: str = getattr(settings, "snipe_series_slugs", "crypto-btc-1h,crypto-eth-1h,crypto-sol-1h")
     series_slugs = [s.strip() for s in slugs_raw.split(",") if s.strip()]
 
     client = get_bayse_client()
@@ -260,12 +260,32 @@ async def snipe_scan():
                 _watch_tasks[watch_key] = task
 
 
+
+def _real_currency(api_value: float | int | None, balance_obj: dict | None) -> float:
+    """
+    Convert a Bayse portfolio API value (fractional scale) to actual currency amount.
+
+    Bayse returns cost/currentValue in a fractional share-price scale (0-1).
+    For NGN: 1 unit = ₦100 (each winning share pays ₦100)
+    For USD: 1 unit =  (each winning share pays )
+    """
+    if api_value is None:
+        return 0.0
+    currency = str((balance_obj or {}).get("currency", "")).strip().upper()
+    if currency == "NGN":
+        return float(api_value) * 100.0
+    return float(api_value)  # USD and others are 1:1
+
+
 async def stop_loss_scan():
     """
     Sell positions that have lost more than STOP_LOSS_PCT.
-    Uses portfolio outcomeBalances (live from Bayse) for accurate P&L.
+    Iterates over ALL portfolio positions (not just DB-tracked trades).
     """
-    stop_loss_pct: float = getattr(settings, "stop_loss_pct", 0.35)
+    stop_loss_pct: float = getattr(settings, "stop_loss_pct", 0.0)
+    if stop_loss_pct <= 0:
+        return
+
     client = get_bayse_client()
 
     try:
@@ -274,31 +294,27 @@ async def stop_loss_scan():
         if not balances:
             return
 
-        balance_by_market: dict = {}
-        for b in balances:
-            if not b:
-                continue
-            market = b.get("market") or {}
-            mid = market.get("id") or b.get("marketId")
-            if mid:
-                balance_by_market[mid] = b
-
+        # Index DB trades by market_id for extra context
         async with AsyncSessionLocal() as session:
-            result = await session.execute(
+            trade_result = await session.execute(
                 select(Trade).where(Trade.status == "EXECUTED", Trade.resolution.is_(None))
             )
-            trades = list(result.scalars().all())
-            if not trades:
-                return
+            db_trades = {t.market_id: t for t in trade_result.scalars().all()}
 
-            for trade in trades:
+            for b in balances:
+                if not b:
+                    continue
+                market = b.get("market") or {}
+                mid = market.get("id") or b.get("marketId")
+                if not mid:
+                    continue
+
                 try:
-                    b = balance_by_market.get(trade.market_id)
-                    if not b:
-                        continue
-
-                    cost = float(b.get("cost") or b.get("totalCost") or trade.total_cost or 0)
-                    current_value = float(b.get("currentValue") or b.get("value") or 0)
+                    # Bayse API uses fractional scale (0-1). Convert to real currency.
+                    raw_cost = float(b.get("cost") or 0)
+                    raw_current = float(b.get("currentValue") or 0)
+                    cost = _real_currency(raw_cost, b)
+                    current_value = _real_currency(raw_current, b)
 
                     if cost <= 0:
                         continue
@@ -307,35 +323,33 @@ async def stop_loss_scan():
                     if loss_pct < stop_loss_pct:
                         continue
 
-                    sig = None
-                    if trade.signal_id:
+                    # Use DB trade for context if available
+                    trade = db_trades.get(mid)
+                    outcome_label = "YES"
+                    event_id = market.get("event", {}).get("id", "") or mid
+                    if trade and trade.signal_id:
                         sig_r = await session.execute(select(Signal).where(Signal.id == trade.signal_id))
                         sig = sig_r.scalars().first()
-
-                    outcome_label = "NO" if (sig and sig.signal_type in ("BUY_NO", "NO")) else "YES"
-                    event_id = (sig.event_id if sig else None) or trade.market_id
+                        if sig:
+                            outcome_label = "NO" if sig.signal_type in ("BUY_NO", "NO") else "YES"
+                            event_id = sig.event_id or event_id
 
                     logger.info(
-                        "Stop-loss: market=%s cost=â‚¦%.2f now=â‚¦%.2f loss=%.1f%%",
-                        trade.market_id,
-                        cost,
-                        current_value,
-                        loss_pct * 100,
+                        "Stop-loss: market=%s cost=\₦%.2f now=\₦%.2f loss=%.1f%%",
+                        mid, cost, current_value, loss_pct * 100,
                     )
 
                     min_amount = client.minimum_order_amount(client.default_currency)
                     if current_value < min_amount:
                         logger.warning(
-                            "Stop-loss skipped for trade %s: current value â‚¦%.2f below Bayse minimum â‚¦%.2f",
-                            trade.id,
-                            current_value,
-                            min_amount,
+                            "Stop-loss skipped for %s: value \u20a6%.2f below minimum \u20a6%.2f",
+                            mid, current_value, min_amount,
                         )
                         continue
 
                     await client.place_order(
                         event_id=event_id,
-                        market_id=trade.market_id,
+                        market_id=mid,
                         side="SELL",
                         outcome=outcome_label,
                         amount=current_value,
@@ -343,14 +357,135 @@ async def stop_loss_scan():
                         currency=client.default_currency,
                     )
 
-                    trade.status = "STALE"
-                    session.add(trade)
-                    await session.commit()
+                    if trade:
+                        trade.status = "STALE"
+                        session.add(trade)
+                        await session.commit()
 
-                    logger.info("Stop-loss: sell order sent for trade %s", trade.id)
+                    logger.info("Stop-loss: sell order sent for market %s", mid)
 
                 except Exception as exc:
-                    logger.warning("Stop-loss failed for trade %s: %s", trade.id, exc, exc_info=True)
+                    logger.warning("Stop-loss failed for market %s: %s", mid, exc, exc_info=True)
 
     except Exception as exc:
         logger.warning("Stop-loss scan failed: %s", exc, exc_info=True)
+
+async def take_profit_scan():
+    """
+    Sell positions that have gained more than TAKE_PROFIT_PCT.
+    Iterates over ALL portfolio positions (not just DB-tracked trades).
+
+    Supports two modes:
+      - Full exit (take_profit_partial_exit=False): sells entire position
+      - Partial exit (take_profit_partial_exit=True): sells enough to recover cost
+        basis, leaving the rest as a "free bet" riding to resolution
+    """
+    take_profit_pct: float = getattr(settings, "take_profit_pct", 0.0)
+    if take_profit_pct <= 0:
+        return
+
+    partial_exit: bool = getattr(settings, "take_profit_partial_exit", True)
+    client = get_bayse_client()
+
+    try:
+        portfolio = await client.get_portfolio() or {}
+        balances = portfolio.get("outcomeBalances") or []
+        if not balances:
+            return
+
+        async with AsyncSessionLocal() as session:
+            trade_result = await session.execute(
+                select(Trade).where(Trade.status == "EXECUTED", Trade.resolution.is_(None))
+            )
+            db_trades = {t.market_id: t for t in trade_result.scalars().all()}
+
+            for b in balances:
+                if not b:
+                    continue
+                market = b.get("market") or {}
+                mid = market.get("id") or b.get("marketId")
+                if not mid:
+                    continue
+
+                try:
+                    raw_cost = float(b.get("cost") or 0)
+                    raw_current = float(b.get("currentValue") or 0)
+                    cost = _real_currency(raw_cost, b)
+                    current_value = _real_currency(raw_current, b)
+
+                    if cost <= 0 or current_value <= 0:
+                        continue
+
+                    profit_pct = (current_value - cost) / cost
+                    if profit_pct < take_profit_pct:
+                        continue
+
+                    trade = db_trades.get(mid)
+                    outcome_label = "YES"
+                    event_id = market.get("event", {}).get("id", "") or mid
+                    if trade and trade.signal_id:
+                        sig_r = await session.execute(select(Signal).where(Signal.id == trade.signal_id))
+                        sig = sig_r.scalars().first()
+                        if sig:
+                            outcome_label = "NO" if sig.signal_type in ("BUY_NO", "NO") else "YES"
+                            event_id = sig.event_id or event_id
+
+                    if partial_exit:
+                        sell_amount = round(cost, 2)
+                        if sell_amount < client.minimum_order_amount(client.default_currency):
+                            logger.info(
+                                "Take-profit (partial) skipped for %s: cost basis \u20a6%.2f "
+                                "below minimum \u20a6%.2f — selling full instead",
+                                mid, sell_amount, client.minimum_order_amount(client.default_currency),
+                            )
+                            sell_amount = current_value
+                            partial_label = "full"
+                        else:
+                            partial_label = "partial (cost basis recovered)"
+                    else:
+                        sell_amount = current_value
+                        partial_label = "full"
+
+                    logger.info(
+                        "Take-profit: market=%s cost=\₦%.2f now=\₦%.2f profit=%.1f%% mode=%s",
+                        mid, cost, current_value, profit_pct * 100, partial_label,
+                    )
+
+                    min_amount = client.minimum_order_amount(client.default_currency)
+                    if sell_amount < min_amount:
+                        logger.warning(
+                            "Take-profit skipped for %s: sell amount \u20a6%.2f below "
+                            "Bayse minimum \u20a6%.2f",
+                            mid, sell_amount, min_amount,
+                        )
+                        continue
+
+                    await client.place_order(
+                        event_id=event_id,
+                        market_id=mid,
+                        side="SELL",
+                        outcome=outcome_label,
+                        amount=sell_amount,
+                        order_type="MARKET",
+                        currency=client.default_currency,
+                    )
+
+                    if partial_exit and sell_amount < current_value:
+                        logger.info(
+                            "Take-profit (partial): sold \u20a6%.2f, \u20a6%.2f remains as free bet for market %s",
+                            sell_amount, current_value - sell_amount, mid,
+                        )
+                    elif trade:
+                        trade.status = "STALE"
+                        session.add(trade)
+                        await session.commit()
+                        logger.info("Take-profit (full): sell order sent for market %s", mid)
+                    else:
+                        logger.info("Take-profit: sell order sent for portfolio position %s", mid)
+
+                except Exception as exc:
+                    logger.warning("Take-profit failed for market %s: %s", mid, exc, exc_info=True)
+
+    except Exception as exc:
+        logger.warning("Take-profit scan failed: %s", exc, exc_info=True)
+

@@ -44,7 +44,7 @@ def disable_rag(monkeypatch):
 
 class DummySearch(WebSearchService):
     async def search(self, query: str, **kwargs):
-        return {"results": [{"url": "https://example.com", "snippet": "test news"}]}
+        return {"results": [{"url": "https://example.com", "snippet": "Breaking: Central bank announces new policy rates affecting currency markets today with significant impact on exchange rates"}]}
 
 
 class DummyBayse(BayseClient):

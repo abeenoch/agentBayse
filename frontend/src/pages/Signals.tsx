@@ -61,13 +61,13 @@ export function Signals() {
       <div className="flex items-center gap-2 text-sm">
         <button
           onClick={() => { setShowAll(false); setPage(1); }}
-          className={`px-3 py-1 rounded-lg border transition ${!showAll ? "border-primary bg-primary/20 text-primary" : "border-border text-muted hover:text-text"}`}
+          className={`px-3 py-2 rounded-lg border transition ${!showAll ? "border-primary bg-primary/20 text-primary" : "border-border text-muted hover:text-text"}`}
         >
           Active (24h)
         </button>
         <button
           onClick={() => { setShowAll(true); setPage(1); }}
-          className={`px-3 py-1 rounded-lg border transition ${showAll ? "border-primary bg-primary/20 text-primary" : "border-border text-muted hover:text-text"}`}
+          className={`px-3 py-2 rounded-lg border transition ${showAll ? "border-primary bg-primary/20 text-primary" : "border-border text-muted hover:text-text"}`}
         >
           All history
         </button>
@@ -137,7 +137,7 @@ export function Signals() {
         <button
           onClick={() => setPage((p) => Math.max(1, p - 1))}
           disabled={page === 1}
-          className="px-3 py-1 rounded-lg border border-border text-sm disabled:opacity-50"
+          className="px-3 py-2 rounded-lg border border-border text-sm disabled:opacity-50"
         >
           Previous
         </button>
@@ -145,7 +145,7 @@ export function Signals() {
         <button
           onClick={() => setPage((p) => p + 1)}
           disabled={!signals.length || signals.length < 20 || page * 20 >= (data?.total ?? 0)}
-          className="px-3 py-1 rounded-lg border border-border text-sm disabled:opacity-50"
+          className="px-3 py-2 rounded-lg border border-border text-sm disabled:opacity-50"
         >
           Next
         </button>

@@ -98,12 +98,13 @@ class TrainingRow:
     features: list[float]
 
 
-def _build_features(signal: Signal, trade: Trade, snapshot_features: dict[str, float] | None = None) -> list[float]:
+def _build_features(signal: Signal, trade: Trade | None = None, snapshot_features: dict[str, float] | None = None) -> list[float]:
     prob = float(signal.estimated_probability or 0.0)
     price = _normalize_price(signal.market_price_at_signal)
     conf = _clip(float(signal.confidence or 0.0) / 100.0, 0.0, 1.0)
     is_buy_no = 1.0 if (signal.signal_type or "").upper() == "BUY_NO" else 0.0
-    snapshot_features = snapshot_features or snapshot_context_features(None, as_of=signal.created_at or trade.created_at)
+    as_of = signal.created_at or (trade.created_at if trade else None) or datetime.utcnow()
+    snapshot_features = snapshot_features or snapshot_context_features(None, as_of=as_of)
     return [
         1.0,
         is_buy_no,
@@ -150,10 +151,10 @@ async def load_training_rows(
 ) -> list[TrainingRow]:
     query = (
         select(Signal, Trade)
-        .join(Trade, Trade.signal_id == Signal.id)
+        .outerjoin(Trade, Trade.signal_id == Signal.id)
         .where(
             Signal.signal_type.in_(["BUY_YES", "BUY_NO"]),
-            Trade.resolution.in_(["WIN", "LOSS"]),
+            Signal.resolution.in_(["WIN", "LOSS"]),
         )
         .order_by(Signal.created_at.asc())
     )
@@ -167,18 +168,20 @@ async def load_training_rows(
 
     rows: list[TrainingRow] = []
     for signal, trade in raw_rows:
-        outcome = str(trade.resolution or signal.resolution or "").strip().upper()
+        outcome = str(trade.resolution if trade else signal.resolution or "").strip().upper()
         if outcome not in {"WIN", "LOSS"}:
             continue
-        as_of = signal.created_at or trade.created_at or datetime.utcnow()
+        as_of = signal.created_at or (trade.created_at if trade else None) or datetime.utcnow()
         snapshot = select_market_snapshot(snapshot_index, market_id=signal.market_id, as_of=as_of)
         snapshot_features = snapshot_context_features(snapshot, as_of=as_of)
+        state_key = getattr(trade, "bayes_state_key", None) if trade else None
+        state_key = state_key or getattr(signal, "bayes_state_key", None) or "default"
         rows.append(
             TrainingRow(
                 created_at=as_of,
                 signal_type=signal.signal_type,
                 label=1 if _is_win_for_signal(signal.signal_type, outcome) else 0,
-                state_key=getattr(trade, "bayes_state_key", None) or getattr(signal, "bayes_state_key", None) or "default",
+                state_key=state_key,
                 features=_build_features(signal, trade, snapshot_features),
             )
         )

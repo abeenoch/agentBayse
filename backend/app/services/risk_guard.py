@@ -60,6 +60,19 @@ def risk_guard(signal: dict, portfolio: dict, cfg=None) -> RiskCheckResult:
     if signal.get("expected_value") is not None and signal["expected_value"] < 0:
         reasons.append("non-positive EV")
 
+    # Minimum edge filter: skip markets where the estimated probability is within
+    # 10% of the market price — at 15% fee, this edge is consumed by fees.
+    est_prob = signal.get("estimated_probability")
+    mkt_price = signal.get("current_market_price")
+    if est_prob is not None and mkt_price is not None:
+        mkt_price_frac = mkt_price / 100 if mkt_price > 1 else mkt_price
+        edge = abs(float(est_prob) - float(mkt_price_frac))
+        if edge < 0.10:
+            reasons.append(
+                f"insufficient edge ({edge:.2%}) — need ≥10% gap between estimated prob "
+                f"({est_prob:.2%}) and market price ({mkt_price_frac:.2%}) to cover 15% fee"
+            )
+
     # EV must exceed the flat ₦5 Bayse fee as a percentage of stake
     # e.g. ₦100 stake → need EV > 5, ₦500 stake → need EV > 1, ₦1000 → need EV > 0.5
     stake = signal.get("suggested_stake") or 100.0

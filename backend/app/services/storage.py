@@ -9,6 +9,7 @@ from app.models.market_snapshot import MarketSnapshot as MarketSnapshotModel
 from app.models.feature_snapshot import FeatureSnapshot as FeatureSnapshotModel
 from app.models.portfolio_snapshot import PortfolioSnapshot as PortfolioSnapshotModel
 from app.models.bayes_state import BayesState as BayesStateModel
+from app.config import settings
 from app.services.feature_encoder import FeatureEncoding
 from app.services.bayes_model import BayesPosterior, BayesState
 from app.websocket_manager import manager
@@ -209,6 +210,58 @@ async def save_portfolio_snapshot(
 async def get_bayes_state(session: AsyncSession, state_key: str = "default") -> BayesStateModel | None:
     result = await session.execute(select(BayesStateModel).where(BayesStateModel.state_key == state_key))
     return result.scalar_one_or_none()
+
+
+async def ensure_bayes_state(
+    session: AsyncSession,
+    *,
+    state_key: str,
+    alpha: float = 1.0,
+    beta: float = 1.0,
+) -> BayesStateModel:
+    """
+    Idempotently create a Bayes state row with a neutral prior.
+
+    alpha=1, beta=1 gives a flat 50/50 prior_yes. Existing rows are never
+    overwritten, so real learning always wins over the seed.
+    """
+    existing = await get_bayes_state(session, state_key=state_key)
+    if existing is not None:
+        return existing
+    total = alpha + beta
+    prior = (alpha / total) if total else 0.5
+    obj = BayesStateModel(
+        state_key=state_key,
+        model_version="v1",
+        prior_json={"alpha": alpha, "beta": beta, "prior_yes": prior},
+        parameter_json={"alpha": alpha, "beta": beta, "yes_updates": 0, "no_updates": 0},
+        yes_updates=0,
+        no_updates=0,
+    )
+    session.add(obj)
+    await session.commit()
+    await session.refresh(obj)
+    return obj
+
+
+def crypto_bayes_state_keys() -> list[str]:
+    """State keys to pre-seed with a neutral 50/50 prior for crypto series."""
+    keys: list[str] = []
+    for raw in (
+        getattr(settings, "agent_series_slugs", ""),
+        getattr(settings, "snipe_series_slugs", ""),
+    ):
+        for slug in [s.strip() for s in str(raw).split(",") if s.strip()]:
+            slug_lower = slug.lower()
+            if slug_lower.startswith("crypto-"):
+                key = f"series:{slug_lower}"
+                if key not in keys:
+                    keys.append(key)
+    if "crypto" not in keys:
+        keys.append("crypto")
+    if "category:crypto" not in keys:
+        keys.append("category:crypto")
+    return keys
 
 
 async def list_feature_snapshots(

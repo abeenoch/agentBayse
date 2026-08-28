@@ -26,7 +26,10 @@ pending_markets: List[Dict] = []
 ORDER_MONITOR_JOB_ID = "order_monitor"
 SNIPER_JOB_ID = "sniper"
 STOP_LOSS_JOB_ID = "stop_loss"
+TAKE_PROFIT_JOB_ID = "take_profit"
+SIGNAL_RECONCILE_JOB_ID = "signal_reconcile"
 
+TRAINING_JOB_ID = "bayes_training"
 WATCHLIST_KEYWORDS = {
     # BTC with 15-minute timeframe
     "btc": ["btc", "bitcoin"],
@@ -324,15 +327,8 @@ async def populate_queue():
         if slugs_raw:
             series_slugs = [s.strip() for s in slugs_raw.split(",") if s.strip()]
         else:
-            # Default: all automated series we know about
-            series_slugs = [
-                "crypto-btc-5min", "crypto-sol-5min", "crypto-eth-5min", "crypto-bnb-5min",
-                "crypto-btc-15min", "crypto-sol-15min", "crypto-eth-15min",
-                "crypto-btc-1h", "crypto-sol-1h", "crypto-eth-1h",
-                "fx-usdngn-1h", "fx-gbpusd-1h", "fx-eurusd-1h",
-                "fx-gbpjpy-1h", "fx-eurjpy-1h", "fx-usdjpy-1h",
-                "commodity-xauusd-1h", "commodity-xagusd-1h",
-            ]
+            # Default: 1-hour crypto focus for higher edge
+            series_slugs = ["crypto-btc-1h", "crypto-eth-1h", "crypto-sol-1h"]
 
         # Optionally filter by categories from DB config
         cfg_categories = {c.lower() for c in (cfg.categories or [])}
@@ -568,6 +564,50 @@ async def ensure_order_monitor_job():
         logger.error("Failed to schedule order monitor: %s", exc, exc_info=True)
 
 
+async def reconcile_signal_outcomes():
+    """Periodically check unresolved non-executed signals against market outcomes."""
+    client = get_bayse_client()
+    try:
+        async with AsyncSessionLocal() as session:
+            from app.services.outcome_sync import reconcile_unexecuted_signals
+            result = await reconcile_unexecuted_signals(session, client, max_signals=50)
+            if result["resolved"] > 0:
+                logger.info(
+                    "Signal reconciliation: scanned=%d resolved=%d skipped=%d events_checked=%d",
+                    result["scanned"],
+                    result["resolved"],
+                    result["skipped"],
+                    result["events_checked"],
+                )
+    except Exception as exc:
+        logger.error("Signal reconciliation failed: %s", exc, exc_info=True)
+
+
+
+
+async def periodic_bayes_training():
+    """Periodically retrain Bayes models for all active state keys."""
+    from app.services.bayes_training import train_bayes_model
+    state_keys = ["series:crypto-btc-1h", "series:crypto-eth-1h", "series:crypto-sol-1h"]
+    try:
+        async with AsyncSessionLocal() as session:
+            for key in state_keys:
+                try:
+                    result = await train_bayes_model(session, state_key=key)
+                    if result.get("sample_size", 0) > 0:
+                        logger.info(
+                            "Bayes training complete: key=%s samples=%d train=%d test=%d pos_rate=%.3f",
+                            key,
+                            result["sample_size"],
+                            result["train_size"],
+                            result["test_size"],
+                            result["positive_rate"],
+                        )
+                except Exception as exc:
+                    logger.warning("Bayes training failed for key %s: %s", key, exc, exc_info=True)
+    except Exception as exc:
+        logger.error("Bayes training cycle failed: %s", exc, exc_info=True)
+
 def start_scheduler():
     if scheduler.running:
         return
@@ -588,7 +628,7 @@ def start_scheduler():
         max_instances=1,
     )
     # Sniper — runs every 30 seconds
-    from app.services.sniper import snipe_scan, stop_loss_scan
+    from app.services.sniper import snipe_scan, stop_loss_scan, take_profit_scan
     scheduler.add_job(
         snipe_scan,
         "interval",
@@ -606,6 +646,41 @@ def start_scheduler():
         max_instances=1,
         coalesce=True,
     )
+    # Take-profit monitor — runs every 20 seconds
+    if settings.take_profit_pct > 0:
+        scheduler.add_job(
+            take_profit_scan,
+            "interval",
+            seconds=20,
+            id=TAKE_PROFIT_JOB_ID,
+            max_instances=1,
+            coalesce=True,
+        )
+        logger.info("Take-profit scanner enabled (threshold=%.0f%% partial=%s)",
+                     settings.take_profit_pct * 100, settings.take_profit_partial_exit)
+    # Signal outcome reconciliation — checks non-executed signals for outcomes
+    if settings.signal_reconcile_interval_seconds > 0:
+        scheduler.add_job(
+            reconcile_signal_outcomes,
+            "interval",
+            seconds=settings.signal_reconcile_interval_seconds,
+            id=SIGNAL_RECONCILE_JOB_ID,
+            max_instances=1,
+            coalesce=True,
+        )
+        logger.info("Signal reconciliation enabled (interval=%ds weight=%.2f)",
+                     settings.signal_reconcile_interval_seconds, settings.signal_outcome_weight)
+    # Periodic Bayes model retraining — runs every 6 hours
+    scheduler.add_job(
+        periodic_bayes_training,
+        "interval",
+        hours=6,
+        id=TRAINING_JOB_ID,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(),  # Run immediately on startup
+    )
+    logger.info("Bayes training job scheduled (interval=6h, first run NOW)")
     logger.info(
         "Starting scheduler with agent cycle every %ss (first run NOW)",
         settings.agent_scan_interval_seconds,

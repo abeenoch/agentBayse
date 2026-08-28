@@ -150,6 +150,7 @@ class FeatureEncoder:
             f"no_price: {context.get('no_price', 'n/a')}",
             f"time_remaining: {context.get('time_remaining', 'unknown')}",
             f"timeframe: {context.get('timeframe', 'unknown')}",
+            f"momentum: {context.get('momentum', 'NEUTRAL')}",
             f"portfolio: {json.dumps(context.get('portfolio', {}), ensure_ascii=False)}",
             f"history: {json.dumps(context.get('history', []), ensure_ascii=False)}",
             f"news_snippets: {json.dumps(context.get('snippets', []), ensure_ascii=False)}",
@@ -165,12 +166,51 @@ class FeatureEncoder:
             try:
                 raw_text = await call_llm(prompt, system=system)
                 payload = _extract_json(raw_text)
-                encoded = self._normalize_payload(payload, context)
-                return encoded
+                llm_encoded = self._normalize_payload(payload, context)
+                # Merge: compute the deterministic fallback for all dimensions,
+                # then overwrite only the dimensions the LLM filled with non-zero values.
+                # This prevents half-empty vectors from zero-padding.
+                fallback = self._fallback_encoding(context)
+                return self._merge_with_fallback(llm_encoded, fallback)
             except Exception as exc:
                 logger.warning("Feature encoder LLM path failed; using fallback. err=%s", exc)
 
         return self._fallback_encoding(context)
+
+    def _merge_with_fallback(self, llm: FeatureEncoding, fallback: FeatureEncoding) -> FeatureEncoding:
+        """
+        Merge LLM-produced vectors with deterministic fallback values.
+        For each dimension: use LLM value if it's non-zero, otherwise use fallback.
+        Scalar features from LLM always win (they're explicitly reasoned).
+        """
+        def _merge_vector(llm_vec: list[float], fallback_vec: list[float]) -> list[float]:
+            merged = []
+            for llm_val, fb_val in zip(llm_vec, fallback_vec):
+                merged.append(llm_val if llm_val != 0.0 else fb_val)
+            return merged
+
+        return FeatureEncoding(
+            market_id=llm.market_id,
+            market_name=llm.market_name,
+            event_type=llm.event_type,
+            topic_cluster=llm.topic_cluster,
+            resolution_clarity=llm.resolution_clarity if llm.resolution_clarity != 0.5 else fallback.resolution_clarity,
+            sentiment_polarity=llm.sentiment_polarity if llm.sentiment_polarity != 0.0 else fallback.sentiment_polarity,
+            narrative_strength=llm.narrative_strength if llm.narrative_strength != 0.5 else fallback.narrative_strength,
+            uncertainty=llm.uncertainty,  # always trust LLM uncertainty
+            time_sensitivity=llm.time_sensitivity if llm.time_sensitivity != 0.5 else fallback.time_sensitivity,
+            news_relevance=llm.news_relevance if llm.news_relevance != 0.5 else fallback.news_relevance,
+            contrarian_pressure=llm.contrarian_pressure if llm.contrarian_pressure != 0.5 else fallback.contrarian_pressure,
+            dependency_risk=llm.dependency_risk if llm.dependency_risk != 0.5 else fallback.dependency_risk,
+            market_regime=llm.market_regime,
+            key_facts=llm.key_facts or fallback.key_facts,
+            risk_tags=list(set(llm.risk_tags + fallback.risk_tags)),
+            semantic_vector=_merge_vector(llm.semantic_vector, fallback.semantic_vector),
+            market_vector=_merge_vector(llm.market_vector, fallback.market_vector),
+            portfolio_vector=_merge_vector(llm.portfolio_vector, fallback.portfolio_vector),
+            cross_market_vector=_merge_vector(llm.cross_market_vector, fallback.cross_market_vector),
+            encoder_confidence=max(llm.encoder_confidence, fallback.encoder_confidence),
+        )
 
     def _normalize_payload(self, payload: Mapping[str, Any], context: Mapping[str, Any]) -> FeatureEncoding:
         data = {
@@ -227,6 +267,10 @@ class FeatureEncoder:
         market_regime = "event_driven" if time_remaining and time_remaining < 86400 else "trend"
         encoder_confidence = _clip(0.45 + narrative * 0.25 + news_relevance * 0.15 - uncertainty * 0.1, 0.0, 1.0)
 
+        # Momentum: BULLISH=+1, BEARISH=-1, NEUTRAL=0
+        raw_momentum = context.get("momentum") or "NEUTRAL"
+        momentum_score = 1.0 if raw_momentum == "BULLISH" else (-1.0 if raw_momentum == "BEARISH" else 0.0)
+
         semantic_vector = [
             sentiment,
             narrative,
@@ -245,7 +289,7 @@ class FeatureEncoder:
             _clip(time_sensitivity * 2.0 - 1.0, -1.0, 1.0),
             _clip(self._scale_volume(context.get("volume", 0.0)), -1.0, 1.0),
             _clip(self._scale_liquidity(context.get("liquidity", 0.0)), -1.0, 1.0),
-            _clip((0.5 - uncertainty) * 2.0, -1.0, 1.0),
+            momentum_score,  # price direction signal
         ]
         portfolio_vector = [
             _clip(self._scale_amount(available), -1.0, 1.0),

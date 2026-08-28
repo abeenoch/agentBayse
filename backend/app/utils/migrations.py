@@ -70,6 +70,10 @@ async def run_startup_migrations(conn):
         sync_conn.exec_driver_sql(
             "UPDATE signals SET bayes_state_key = 'default' WHERE bayes_state_key IS NULL OR bayes_state_key = ''"
         )
+        if "direction_correct" not in signal_columns:
+            sync_conn.exec_driver_sql(
+                "ALTER TABLE signals ADD COLUMN direction_correct INTEGER"  # 1=correct, 0=wrong, NULL=unresolved
+            )
 
         trade_columns = {col["name"] for col in inspector.get_columns("trades")}
         if "bayes_state_key" not in trade_columns:

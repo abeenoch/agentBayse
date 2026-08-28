@@ -41,14 +41,27 @@ async def execute_signal(
     min_amount_fn = getattr(client, "minimum_order_amount", None)
     min_amount = min_amount_fn(currency) if callable(min_amount_fn) else (100.0 if currency.upper() == "NGN" else 1.0)
     if amount < min_amount:
+        amount = min_amount
         logger.info(
-            "Raising order amount for market %s from %.2f to Bayse minimum %.2f %s",
+            "Raising order amount for market %s to Bayse minimum %.2f %s",
             signal.market_id,
             amount,
-            min_amount,
             currency,
         )
-        amount = min_amount
+        # If the wallet can't cover the raised amount, skip instead of submitting a
+        # guaranteed-rejected 400 "Insufficient balance" order (noise + wasted call).
+        try:
+            wallet_balance = float(await client.get_wallet_balance(currency) or 0.0)
+        except Exception:
+            wallet_balance = 0.0
+        if amount > wallet_balance:
+            logger.info(
+                "Skipping order for %s — raised amount %.2f exceeds wallet balance %.2f",
+                signal.market_id,
+                amount,
+                wallet_balance,
+            )
+            return None
 
     # Resolve outcomeId from event_data if available, otherwise fetch the event.
     outcome_id = None

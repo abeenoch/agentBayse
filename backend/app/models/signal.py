@@ -26,6 +26,7 @@ class Signal(Base):
     status = Column(String, nullable=False, default="PENDING")
     resolution = Column(String, nullable=True)
     pnl = Column(Float, nullable=True)
+    direction_correct = Column(Integer, nullable=True)  # 1=correct, 0=wrong, NULL=unresolved
     bayes_state_key = Column(String, nullable=False, default="default")
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     approved_at = Column(DateTime, nullable=True)

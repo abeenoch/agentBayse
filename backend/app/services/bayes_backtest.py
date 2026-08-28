@@ -271,6 +271,7 @@ async def build_yes_no_audit(
             Signal.bayes_state_key,
             Trade.resolution,
             Trade.pnl,
+            Signal.suggested_stake,
         )
         .select_from(Signal)
         .outerjoin(Trade, Trade.signal_id == Signal.id)
@@ -296,6 +297,7 @@ async def build_yes_no_audit(
             "price_sum": 0.0,
             "pnl_sum": 0.0,
             "edge_sum": 0.0,
+            "stake_sum": 0.0,
         },
         "BUY_NO": {
             "signal_type": "BUY_NO",
@@ -310,6 +312,7 @@ async def build_yes_no_audit(
             "price_sum": 0.0,
             "pnl_sum": 0.0,
             "edge_sum": 0.0,
+            "stake_sum": 0.0,
         },
     }
 
@@ -319,7 +322,7 @@ async def build_yes_no_audit(
     total_losses = 0
     total_pnl = 0.0
 
-    for signal_type, confidence, estimated_probability, market_price_at_signal, expected_value, _rank_score, _row_state_key, resolution, pnl in rows:
+    for signal_type, confidence, estimated_probability, market_price_at_signal, expected_value, _rank_score, _row_state_key, resolution, pnl, suggested_stake in rows:
         side = str(signal_type or "").upper()
         if side not in side_stats:
             continue
@@ -336,6 +339,7 @@ async def build_yes_no_audit(
         stats["probability_sum"] += prob
         stats["price_sum"] += price
         stats["edge_sum"] += prob - _normalize_price(price)
+        stats["stake_sum"] += float(suggested_stake or 0.0)
 
         is_win = _is_win_for_signal(side, resolution)
         if is_win is None:
@@ -370,6 +374,7 @@ async def build_yes_no_audit(
             "avg_probability": stats["probability_sum"] / count,
             "avg_market_price": stats["price_sum"] / count,
             "avg_edge": stats["edge_sum"] / count,
+            "avg_stake": stats["stake_sum"] / count,
             "avg_pnl": (stats["pnl_sum"] / resolved) if resolved else 0.0,
             "total_pnl": stats["pnl_sum"],
         }

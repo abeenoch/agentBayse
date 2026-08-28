@@ -69,9 +69,9 @@ async def resolve_bayes_state_key(
     Select the best available Bayes state key from a lookup chain.
 
     Preference order:
-      1. Any candidate with historical updates.
-      2. An existing candidate row, even if empty.
-      3. default_key.
+      1. The most specific candidate that already has a state row (scoped memory).
+      2. default_key if it exists.
+      3. The first candidate.
     """
     ordered = [key for key in candidates if key]
     if not ordered:
@@ -86,9 +86,12 @@ async def resolve_bayes_state_key(
 
     by_key = {state.state_key: state for state in states}
 
+    # Scope preference: any existing scoped row (market:/series:/category:) wins
+    # over the shared default key, even when it has no learning updates yet. This
+    # lets an asset class (e.g. crypto) keep an isolated prior instead of inheriting
+    # the default key's history from a different asset class (e.g. FX).
     for key in ordered:
-        state = by_key.get(key)
-        if state and int(state.yes_updates or 0) + int(state.no_updates or 0) > 0:
+        if key != default_key and key in by_key:
             return key
 
     if default_key in by_key:

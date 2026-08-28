@@ -10,8 +10,7 @@ import { useMemo } from "react";
 
 export function Markets() {
   const [page, setPage] = useState(1);
-  const [category, setCategory] = useState<string | undefined>(undefined);
-  const { data, isLoading } = useMarkets(30, page, category);
+  const { data, isLoading } = useMarkets(30, page);
   const markets = data?.events || [];
   const [selected, setSelected] = useState<any | null>(null);
   const firstMarket = selected?.markets?.[0];
@@ -50,21 +49,6 @@ export function Markets() {
           <p className="text-sm text-muted">Browse</p>
           <h1 className="text-2xl font-semibold">Markets</h1>
         </div>
-        <div className="flex gap-2">
-          {["", "crypto", "finance", "sports"].map((cat) => (
-            <button
-              key={cat}
-              onClick={() => { setCategory(cat || undefined); setPage(1); }}
-              className={`px-3 py-1 rounded-lg text-sm border transition ${
-                (category ?? "") === cat
-                  ? "border-primary bg-primary/20 text-primary"
-                  : "border-border text-muted hover:text-text"
-              }`}
-            >
-              {cat || "All"}
-            </button>
-          ))}
-        </div>
       </header>
       {isLoading && <p className="text-muted">Loading...</p>}
       <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
@@ -90,7 +74,7 @@ export function Markets() {
         <button
           onClick={() => setPage((p) => Math.max(1, p - 1))}
           disabled={page === 1}
-          className="px-3 py-1 rounded-lg border border-border text-sm disabled:opacity-50"
+          className="px-3 py-2 rounded-lg border border-border text-sm disabled:opacity-50"
         >
           Previous
         </button>
@@ -100,7 +84,7 @@ export function Markets() {
         <button
           onClick={() => setPage((p) => p + 1)}
           disabled={data?.pagination && page >= (data.pagination.lastPage || page)}
-          className="px-3 py-1 rounded-lg border border-border text-sm disabled:opacity-50"
+          className="px-3 py-2 rounded-lg border border-border text-sm disabled:opacity-50"
         >
           Next
         </button>

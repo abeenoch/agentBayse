@@ -137,7 +137,7 @@ export function Bayes() {
 
   return (
     <div className="space-y-6">
-      <header className="flex items-center justify-between gap-4">
+      <header className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
         <div>
           <p className="text-sm text-muted">Inspector</p>
           <h1 className="text-2xl font-semibold">Bayes Report</h1>
@@ -145,7 +145,7 @@ export function Bayes() {
             The page auto-loads the latest bet. Click any recent bet to inspect its prior, posterior, scope, and settlement trace.
           </p>
         </div>
-        <div className="text-right">
+        <div className="sm:text-right">
           <p className="text-xs text-muted">Current model</p>
           <p className="font-semibold">
             {activeTrainingRun ? `${activeTrainingRun.model_version} - ${activeStateKey}` : "Loading..."}

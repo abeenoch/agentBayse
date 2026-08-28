@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = Field("", env="ANTHROPIC_API_KEY")
     openai_api_key: str = Field("", env="OPENAI_API_KEY")
 
-    search_provider: str = Field("tavily", env="SEARCH_PROVIDER")
+    search_provider: str = Field("duckduckgo", env="SEARCH_PROVIDER")
     tavily_api_key: str = Field("", env="TAVILY_API_KEY")
     serpapi_key: str = Field("", env="SERPAPI_KEY")
     search_depth: str = Field("advanced", env="SEARCH_DEPTH")
@@ -47,10 +47,14 @@ class Settings(BaseSettings):
     agent_event_page_size: int = Field(50, env="AGENT_EVENT_PAGE_SIZE")
     agent_event_pages: int = Field(4, env="AGENT_EVENT_PAGES")
     agent_reanalyze_minutes: int = Field(25, env="AGENT_REANALYZE_MINUTES")
-    # Comma-separated series slugs for the regular agent cycle (empty = all known series)
-    agent_series_slugs: str = Field("", env="AGENT_SERIES_SLUGS")
+    # Comma-separated series slugs for the regular agent cycle (FX-only focus for higher edge)
+    agent_series_slugs: str = Field("crypto-btc-1h,crypto-eth-1h,crypto-sol-1h", env="AGENT_SERIES_SLUGS")
     bayes_live_decision_mode: bool = Field(True, env="BAYES_LIVE_DECISION_MODE")
-    bayes_state_key: str = Field("default", env="BAYES_STATE_KEY")
+    bayes_state_key: str = Field("crypto", env="BAYES_STATE_KEY")
+    # Trained policies need a meaningful number of resolved trades before they may
+    # override the live Bayesian posterior. Below this many samples, the model is
+    # kept as a dashboard artifact but does not steer live decisions.
+    agent_min_train_samples: int = Field(10, env="AGENT_MIN_TRAIN_SAMPLES")
 
     database_url: str = Field(
         "postgresql+asyncpg://postgres:postgres@localhost:5432/agent_bayse",
@@ -65,10 +69,27 @@ class Settings(BaseSettings):
     # Sniper
     snipe_observe_seconds: int = Field(300, env="SNIPE_OBSERVE_SECONDS")  # start watching 5 min out
     snipe_min_seconds: int = Field(8, env="SNIPE_MIN_SECONDS")            # abort if < 8s remain
-    snipe_series_slugs: str = Field("crypto-sol-5min,crypto-btc-5min,crypto-eth-5min,fx-usdngn-1h,fx-gbpusd-1h", env="SNIPE_SERIES_SLUGS")
+    snipe_series_slugs: str = Field("crypto-btc-1h,crypto-eth-1h,crypto-sol-1h", env="SNIPE_SERIES_SLUGS")
 
-    # Stop-loss
-    stop_loss_pct: float = Field(0.35, env="STOP_LOSS_PCT")
+    # Stop-loss — sell when position has lost this percentage. 0 = disabled.
+    # e.g. 0.30 = sell when current value is 30% below entry cost.
+    stop_loss_pct: float = Field(0.30, env="STOP_LOSS_PCT")
+
+    # Take-profit — sell when position is up by this percentage. 0 = disabled.
+    # e.g. 0.50 = sell when current value is 50% above entry cost.
+    take_profit_pct: float = Field(0.50, env="TAKE_PROFIT_PCT")
+
+    # Partial take-profit — when enabled, sells only enough shares to recover cost basis
+    # and lets the rest ride to resolution. When disabled, sells the entire position.
+    take_profit_partial_exit: bool = Field(True, env="TAKE_PROFIT_PARTIAL_EXIT")
+
+    # Signal outcome reconciliation — how often (seconds) to check unresolved non-executed
+    # signals against market outcomes. 0 disables the reconciler.
+    signal_reconcile_interval_seconds: int = Field(300, env="SIGNAL_RECONCILE_INTERVAL_SECONDS")
+
+    # Weight multiplier for non-executed signals in Bayes training (0.0-1.0).
+    # Lower values mean theoretical predictions count less than real-money outcomes.
+    signal_outcome_weight: float = Field(0.5, env="SIGNAL_OUTCOME_WEIGHT")
 
 @lru_cache
 def get_settings() -> Settings:
