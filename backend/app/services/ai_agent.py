@@ -320,6 +320,17 @@ class AIAgent:
                 logger.info("Skipping %s (recent analysis in DB window)", market_id)
                 return None
 
+        # Mark analysis state immediately so the cooldown starts counting
+        # even if pre-filters, LLM, or risk guard skip the market later.
+        self.last_analyzed[market_id] = datetime.utcnow()
+        if session is not None:
+            early_state = await session.get(AnalysisState, market_id)
+            if early_state is None:
+                early_state = AnalysisState(market_id=market_id)
+            early_state.last_analyzed = datetime.utcnow()
+            session.add(early_state)
+            await session.commit()
+
         if event and isinstance(event, dict):
             event_id = event.get("id") or event.get("eventId") or ""
 
